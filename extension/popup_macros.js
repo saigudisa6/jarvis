@@ -67,7 +67,8 @@
     </div>
     <div class="macro-list" id="jarvis-macro-list"></div>
   `;
-  document.body.appendChild(section);
+  const mount = document.getElementById('jarvis-macros-mount') || document.body;
+  mount.appendChild(section);
 
   const listEl = document.getElementById('jarvis-macro-list');
 

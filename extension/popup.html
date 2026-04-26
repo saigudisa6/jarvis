@@ -3,31 +3,330 @@
 <head>
 <meta charset="utf-8">
 <style>
-  :root {
-    color-scheme: dark;
-  }
-  body {
-    width: 300px;
-    padding: 18px;
-    background: linear-gradient(160deg, #1c1c23 0%, #15151c 100%);
-    color: rgba(255, 255, 255, 0.92);
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 420px;
+    background: transparent;
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
                  "Helvetica Neue", system-ui, sans-serif;
-    font-size: 13.5px;
-    margin: 0;
+    color: rgba(255, 255, 255, 0.95);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     letter-spacing: -0.1px;
+    overflow: hidden;
   }
-  h2 {
+
+  /* ── macOS-style window ──────────────────────────────────────────────────── */
+  .window {
+    background: linear-gradient(160deg, rgba(28, 28, 35, 0.95) 0%, rgba(20, 20, 25, 0.95) 100%);
+    backdrop-filter: blur(40px) saturate(180%);
+    -webkit-backdrop-filter: blur(40px) saturate(180%);
+    border: 0.5px solid rgba(255, 255, 255, 0.12);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+    overflow: hidden;
+  }
+
+  .title-bar {
+    display: flex;
+    align-items: center;
+    height: 38px;
+    padding: 0 14px;
+    background: linear-gradient(180deg, rgba(40, 40, 48, 0.6), rgba(28, 28, 35, 0.4));
+    border-bottom: 0.5px solid rgba(255, 255, 255, 0.08);
+    position: relative;
+    user-select: none;
+  }
+
+  .traffic-lights {
+    display: flex;
+    gap: 8px;
+    z-index: 2;
+  }
+
+  .traffic-lights .dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    cursor: default;
+    box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.25);
+    transition: filter 0.15s;
+  }
+
+  .traffic-lights .red    { background: #ff5f57; }
+  .traffic-lights .yellow { background: #febc2e; }
+  .traffic-lights .green  { background: #28c840; }
+
+  .traffic-lights:hover .dot { filter: brightness(1.05); }
+  .traffic-lights .red:hover    { background: #ff7b75; cursor: pointer; }
+  .traffic-lights .yellow:hover { background: #ffce58; }
+  .traffic-lights .green:hover  { background: #5dd66e; }
+
+  .title-bar .title {
+    position: absolute;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-size: 13px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.55);
+    letter-spacing: -0.1px;
+    pointer-events: none;
+  }
+
+  /* ── Content stage ───────────────────────────────────────────────────────── */
+  .content {
+    padding: 0;
+    min-height: 360px;
+    position: relative;
+  }
+
+  /* ── Quiz ────────────────────────────────────────────────────────────────── */
+  #quiz { padding: 18px 26px 26px; }
+
+  .progress {
+    height: 3px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 999px;
+    overflow: hidden;
+    margin-bottom: 22px;
+  }
+  .progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #5ac8fa, #0a84ff);
+    width: 0%;
+    transition: width 0.35s cubic-bezier(.34, 1.56, .64, 1);
+    border-radius: 999px;
+  }
+
+  .step {
+    display: none;
+    animation: slideIn 0.35s cubic-bezier(.34, 1.56, .64, 1);
+  }
+  .step.active { display: block; }
+
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateX(20px); }
+    to   { opacity: 1; transform: translateX(0); }
+  }
+
+  .step-num {
+    font-size: 11px;
+    font-weight: 600;
+    color: rgba(10, 132, 255, 0.95);
+    letter-spacing: 1.2px;
+    margin-bottom: 8px;
+  }
+
+  .question {
+    font-size: 19px;
+    font-weight: 600;
+    line-height: 1.3;
+    margin-bottom: 6px;
+    letter-spacing: -0.3px;
+  }
+
+  .question-sub {
+    font-size: 12.5px;
+    color: rgba(255, 255, 255, 0.5);
+    margin-bottom: 22px;
+    line-height: 1.45;
+  }
+
+  /* Scale (1-5) selector */
+  .scale {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+  .scale button {
+    flex: 1;
+    aspect-ratio: 1;
+    border-radius: 12px;
+    border: 0.5px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.05);
+    color: rgba(255, 255, 255, 0.8);
+    font-size: 16px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .scale button:hover {
+    background: rgba(255, 255, 255, 0.1);
+    transform: translateY(-1px);
+  }
+  .scale button.selected {
+    background: linear-gradient(135deg, #0a84ff, #0066cc);
+    color: white;
+    border-color: transparent;
+    box-shadow: 0 4px 14px rgba(10, 132, 255, 0.35);
+  }
+  .scale-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.42);
+    margin-bottom: 22px;
+    padding: 0 4px;
+  }
+
+  /* Text/textarea inputs */
+  textarea, .step input[type="text"] {
+    width: 100%;
+    background: rgba(255, 255, 255, 0.06);
+    border: 0.5px solid rgba(255, 255, 255, 0.12);
+    border-radius: 12px;
+    color: rgba(255, 255, 255, 0.95);
+    font-size: 14px;
+    font-family: inherit;
+    padding: 12px 14px;
+    outline: none;
+    margin-bottom: 18px;
+    transition: border-color 0.15s, background 0.15s;
+    resize: none;
+    letter-spacing: -0.1px;
+    line-height: 1.5;
+  }
+  textarea { min-height: 80px; }
+  textarea::placeholder, .step input::placeholder { color: rgba(255, 255, 255, 0.32); }
+  textarea:focus, .step input:focus {
+    border-color: rgba(10, 132, 255, 0.55);
+    background: rgba(255, 255, 255, 0.08);
+  }
+
+  /* Chip selector for multi-select */
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 18px;
+  }
+  .chip {
+    padding: 9px 14px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 0.5px solid rgba(255, 255, 255, 0.12);
+    border-radius: 999px;
+    color: rgba(255, 255, 255, 0.85);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    font-family: inherit;
+  }
+  .chip:hover {
+    background: rgba(255, 255, 255, 0.1);
+    transform: translateY(-1px);
+  }
+  .chip.selected {
+    background: linear-gradient(135deg, #0a84ff, #0066cc);
+    color: white;
+    border-color: transparent;
+    box-shadow: 0 4px 12px rgba(10, 132, 255, 0.3);
+  }
+
+  /* Step navigation */
+  .step-nav {
+    display: flex;
+    gap: 10px;
+    margin-top: 6px;
+  }
+  .step-nav button {
+    flex: 1;
+    padding: 11px;
+    border-radius: 11px;
+    border: none;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.15s, transform 0.1s;
+    font-family: inherit;
+    letter-spacing: -0.1px;
+  }
+  .step-nav button:hover  { opacity: 0.92; }
+  .step-nav button:active { transform: scale(0.97); }
+  .step-nav .btn-back {
+    background: rgba(255, 255, 255, 0.08);
+    color: rgba(255, 255, 255, 0.85);
+    flex: 0 0 80px;
+  }
+  .step-nav .btn-next {
+    background: linear-gradient(135deg, #0a84ff, #0066cc);
+    color: white;
+    box-shadow: 0 4px 14px rgba(10, 132, 255, 0.3);
+  }
+  .step-nav .btn-next:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    box-shadow: none;
+  }
+  .hint {
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.35);
+    margin-top: 10px;
+    text-align: center;
+    letter-spacing: 0.1px;
+  }
+  kbd {
+    background: rgba(255, 255, 255, 0.08);
+    border: 0.5px solid rgba(255, 255, 255, 0.15);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-size: 10px;
+    font-family: inherit;
+  }
+
+  /* ── Profile / settings view ─────────────────────────────────────────────── */
+  #profile { padding: 22px 26px 24px; display: none; }
+
+  .profile-greeting {
     background: linear-gradient(135deg, #5ac8fa 0%, #0a84ff 100%);
     -webkit-background-clip: text;
     background-clip: text;
     -webkit-text-fill-color: transparent;
-    font-size: 17px;
+    font-size: 19px;
     font-weight: 700;
-    margin: 0 0 16px;
     letter-spacing: -0.3px;
+    margin-bottom: 4px;
+  }
+  .profile-tagline {
+    color: rgba(255, 255, 255, 0.55);
+    font-size: 12.5px;
+    margin-bottom: 16px;
+  }
+
+  .profile-card {
+    background: rgba(255, 255, 255, 0.04);
+    border: 0.5px solid rgba(255, 255, 255, 0.08);
+    border-radius: 14px;
+    padding: 14px 16px;
+    margin-bottom: 16px;
+  }
+  .profile-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 7px 0;
+    font-size: 13px;
+    border-bottom: 0.5px solid rgba(255, 255, 255, 0.06);
+  }
+  .profile-row:last-child { border-bottom: none; }
+  .profile-row .pl { color: rgba(255, 255, 255, 0.5); font-weight: 500; }
+  .profile-row .pv { color: rgba(255, 255, 255, 0.95); text-align: right; max-width: 60%; }
+
+  hr {
+    border: none;
+    border-top: 0.5px solid rgba(255, 255, 255, 0.08);
+    margin: 14px 0;
+  }
+  .section-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.5);
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    margin: 14px 0 8px;
   }
   label {
     display: block;
@@ -38,7 +337,7 @@
     text-transform: uppercase;
     letter-spacing: 0.4px;
   }
-  input {
+  #profile input {
     width: 100%;
     background: rgba(255, 255, 255, 0.06);
     border: 0.5px solid rgba(255, 255, 255, 0.12);
@@ -46,18 +345,15 @@
     color: rgba(255, 255, 255, 0.95);
     font-size: 13px;
     padding: 9px 12px;
-    box-sizing: border-box;
-    margin-bottom: 12px;
+    margin-bottom: 10px;
     outline: none;
     font-family: inherit;
-    transition: border-color 0.15s, background 0.15s;
   }
-  input::placeholder { color: rgba(255, 255, 255, 0.32); }
-  input:focus {
+  #profile input:focus {
     border-color: rgba(10, 132, 255, 0.55);
     background: rgba(255, 255, 255, 0.08);
   }
-  button {
+  #profile button {
     width: 100%;
     padding: 10px;
     border-radius: 10px;
@@ -66,42 +362,38 @@
     font-size: 13px;
     font-weight: 600;
     margin-bottom: 8px;
-    transition: opacity 0.15s, transform 0.1s, background 0.15s;
     font-family: inherit;
-    letter-spacing: -0.1px;
+    transition: opacity 0.15s, transform 0.1s;
   }
-  button:hover  { opacity: 0.92; }
-  button:active { transform: scale(0.98); }
+  #profile button:hover  { opacity: 0.92; }
+  #profile button:active { transform: scale(0.98); }
 
+  #btn-edit-profile {
+    background: rgba(255, 255, 255, 0.08);
+    color: rgba(255, 255, 255, 0.85);
+  }
   #btn-save {
-    background: linear-gradient(135deg, #0a84ff 0%, #0066cc 100%);
+    background: linear-gradient(135deg, #0a84ff, #0066cc);
     color: white;
     box-shadow: 0 4px 14px rgba(10, 132, 255, 0.28);
   }
   #btn-auth {
-    background: linear-gradient(135deg, #34c759 0%, #28a745 100%);
+    background: linear-gradient(135deg, #34c759, #28a745);
     color: white;
     box-shadow: 0 4px 14px rgba(52, 199, 89, 0.28);
   }
 
-  hr {
-    border: none;
-    border-top: 0.5px solid rgba(255, 255, 255, 0.1);
-    margin: 14px 0;
-  }
   .row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 10px;
+    margin-bottom: 8px;
   }
   .row span:first-child {
     color: rgba(255, 255, 255, 0.7);
     font-size: 12.5px;
-    font-weight: 500;
   }
   .badge {
-    display: inline-block;
     padding: 3px 9px;
     border-radius: 999px;
     font-size: 10.5px;
@@ -118,25 +410,190 @@
     color: #ff6961;
     border: 0.5px solid rgba(255, 69, 58, 0.35);
   }
-  #status { font-size: 12px; min-height: 18px; color: rgba(255, 255, 255, 0.7); }
+  #status {
+    font-size: 11.5px;
+    min-height: 16px;
+    color: rgba(255, 255, 255, 0.65);
+    margin-top: 2px;
+  }
+
+  .completion-badge {
+    background: linear-gradient(135deg, rgba(52, 199, 89, 0.22), rgba(52, 199, 89, 0.1));
+    color: #6dd58e;
+    padding: 22px;
+    border-radius: 14px;
+    text-align: center;
+    margin-bottom: 20px;
+    border: 0.5px solid rgba(52, 199, 89, 0.3);
+  }
+  .completion-badge .check {
+    font-size: 36px;
+    display: block;
+    margin-bottom: 8px;
+  }
+  .completion-badge .ct {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .completion-badge .csub {
+    font-size: 12.5px;
+    color: rgba(255, 255, 255, 0.65);
+  }
 </style>
 </head>
 <body>
-<h2>⚡ JARVIS</h2>
 
-<label>ASI:One API Key</label>
-<input type="password" id="asi-key" placeholder="sk-..." />
-<button id="btn-save">Save Key</button>
+<div class="window">
+  <header class="title-bar">
+    <div class="traffic-lights">
+      <span class="dot red"    data-action="close"    title="Close"></span>
+      <span class="dot yellow" data-action="minimize" title="Minimize"></span>
+      <span class="dot green"  data-action="profile"  title="Profile"></span>
+    </div>
+    <div class="title">JARVIS</div>
+  </header>
 
-<hr>
+  <main class="content">
+    <!-- ─── QUIZ ─────────────────────────────────────────────────────────── -->
+    <div id="quiz">
+      <div class="progress"><div class="progress-fill" id="progress-fill"></div></div>
 
-<div class="row">
-  <span>Google · Gmail + Calendar</span>
-  <span id="google-badge" class="badge err">not connected</span>
+      <div class="step active" data-step="0" data-field="distraction" data-type="scale">
+        <div class="step-num">01 · FOCUS</div>
+        <div class="question">How easily distracted are you?</div>
+        <div class="question-sub">JARVIS uses this to know when to nudge you back on task.</div>
+        <div class="scale">
+          <button data-value="1">1</button>
+          <button data-value="2">2</button>
+          <button data-value="3">3</button>
+          <button data-value="4">4</button>
+          <button data-value="5">5</button>
+        </div>
+        <div class="scale-labels"><span>laser focus</span><span>squirrel!</span></div>
+        <div class="step-nav">
+          <button class="btn-next" disabled>Next</button>
+        </div>
+      </div>
+
+      <div class="step" data-step="1" data-field="chillness" data-type="scale">
+        <div class="step-num">02 · VIBE</div>
+        <div class="question">How chill are you?</div>
+        <div class="question-sub">Calibrates the tone JARVIS uses with you — terse vs. friendly.</div>
+        <div class="scale">
+          <button data-value="1">1</button>
+          <button data-value="2">2</button>
+          <button data-value="3">3</button>
+          <button data-value="4">4</button>
+          <button data-value="5">5</button>
+        </div>
+        <div class="scale-labels"><span>tightly wound</span><span>zen master</span></div>
+        <div class="step-nav">
+          <button class="btn-back">Back</button>
+          <button class="btn-next" disabled>Next</button>
+        </div>
+      </div>
+
+      <div class="step" data-step="2" data-field="overallGoal" data-type="text">
+        <div class="step-num">03 · NORTH STAR</div>
+        <div class="question">What's your overall goal?</div>
+        <div class="question-sub">The big-picture thing you're moving toward.</div>
+        <textarea placeholder="e.g. build a startup that helps people focus deeply"></textarea>
+        <div class="step-nav">
+          <button class="btn-back">Back</button>
+          <button class="btn-next" disabled>Next</button>
+        </div>
+        <div class="hint"><kbd>↵</kbd> to continue · <kbd>shift</kbd>+<kbd>↵</kbd> for new line</div>
+      </div>
+
+      <div class="step" data-step="3" data-field="shortGoal" data-type="text">
+        <div class="step-num">04 · SHORT TERM</div>
+        <div class="question">What about the next few months?</div>
+        <div class="question-sub">Concrete goals JARVIS should keep in front of you.</div>
+        <textarea placeholder="e.g. ship the v1 of macros, 4.0 GPA this semester"></textarea>
+        <div class="step-nav">
+          <button class="btn-back">Back</button>
+          <button class="btn-next" disabled>Next</button>
+        </div>
+      </div>
+
+      <div class="step" data-step="4" data-field="longGoal" data-type="text">
+        <div class="step-num">05 · LONG TERM</div>
+        <div class="question">And in the next few years?</div>
+        <div class="question-sub">Bigger ambitions — the why behind the day-to-day.</div>
+        <textarea placeholder="e.g. become a founder, move to NYC, run a marathon"></textarea>
+        <div class="step-nav">
+          <button class="btn-back">Back</button>
+          <button class="btn-next" disabled>Next</button>
+        </div>
+      </div>
+
+      <div class="step" data-step="5" data-field="food" data-type="text">
+        <div class="step-num">06 · TASTE</div>
+        <div class="question">What kind of food do you love?</div>
+        <div class="question-sub">For the restaurant agent — cuisines, dietary stuff, vibes.</div>
+        <textarea placeholder="e.g. ramen, sushi, anything spicy, cozy cafés"></textarea>
+        <div class="step-nav">
+          <button class="btn-back">Back</button>
+          <button class="btn-next" disabled>Next</button>
+        </div>
+      </div>
+
+      <div class="step" data-step="6" data-field="locations" data-type="chips">
+        <div class="step-num">07 · WHERE</div>
+        <div class="question">What kind of spots do you prefer?</div>
+        <div class="question-sub">Pick all that apply — restaurant suggestions skew this way.</div>
+        <div class="chips" id="loc-chips">
+          <button class="chip" data-value="beach">🏖 Beach</button>
+          <button class="chip" data-value="downtown">🌆 Downtown</button>
+          <button class="chip" data-value="mountains">🏔 Mountains</button>
+          <button class="chip" data-value="suburbs">🏡 Suburbs</button>
+          <button class="chip" data-value="rooftop">🍸 Rooftops</button>
+          <button class="chip" data-value="cozy">☕ Cozy</button>
+          <button class="chip" data-value="trendy">✨ Trendy</button>
+          <button class="chip" data-value="cheap-eats">💸 Cheap eats</button>
+          <button class="chip" data-value="fine-dining">🍷 Fine dining</button>
+          <button class="chip" data-value="outdoor">🌿 Outdoor</button>
+        </div>
+        <div class="step-nav">
+          <button class="btn-back">Back</button>
+          <button class="btn-next" disabled>Finish</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── PROFILE / SETTINGS ──────────────────────────────────────────── -->
+    <div id="profile">
+      <div class="completion-badge" id="completion-badge" style="display:none">
+        <span class="check">✓</span>
+        <div class="ct">Profile saved</div>
+        <div class="csub">JARVIS now knows how to nudge you.</div>
+      </div>
+
+      <div class="profile-greeting">⚡ JARVIS</div>
+      <div class="profile-tagline">Your context-aware assistant.</div>
+
+      <div class="profile-card" id="profile-card"></div>
+      <button id="btn-edit-profile">Retake quiz</button>
+
+      <div class="section-title">API & Integrations</div>
+
+      <label>ASI:One API Key</label>
+      <input type="password" id="asi-key" placeholder="sk-..." />
+      <button id="btn-save">Save Key</button>
+
+      <div class="row" style="margin-top: 4px;">
+        <span>Google · Gmail + Calendar</span>
+        <span id="google-badge" class="badge err">not connected</span>
+      </div>
+      <button id="btn-auth">Connect Google</button>
+
+      <div id="status"></div>
+
+      <div id="jarvis-macros-mount"></div>
+    </div>
+  </main>
 </div>
-<button id="btn-auth">Connect Google</button>
-
-<div id="status"></div>
 
 <script src="popup.js"></script>
 <script src="popup_macros.js"></script>

@@ -288,6 +288,7 @@
 
   function highlightTimesInEmail(meetings) {
     ensureTimeHighlightStyles();
+    ensureNoteStyles();
     const patterns = meetings.flatMap(timePatternsFor);
     console.log('[JARVIS] highlightTimesInEmail meetings:', meetings, 'patterns:', patterns);
     const rows = findMatchingRows(meetings);
@@ -295,6 +296,9 @@
     _activeHighlightMeetings = meetings;
     startHighlightObserver();
     console.log(`[JARVIS] highlighted ${rows.length} row(s); watching for new ones`);
+
+    // Inline contextual notes — fired async since they may need calendar data
+    addContextualNotes(meetings, rows);
     return rows.length;
   }
 
@@ -303,6 +307,139 @@
     stopHighlightObserver();
     document.querySelectorAll('.jarvis-row-highlight')
       .forEach(el => el.classList.remove('jarvis-row-highlight'));
+    document.querySelectorAll('.jarvis-note-row, .jarvis-note-block').forEach(el => el.remove());
+  }
+
+  // ── Inline contextual notes ────────────────────────────────────────────────────
+  let _noteStylesInjected = false;
+  function ensureNoteStyles() {
+    if (_noteStylesInjected) return;
+    _noteStylesInjected = true;
+    const style = document.createElement('style');
+    style.id = 'jarvis-note-styles';
+    style.textContent = `
+      .jarvis-note-row > td { padding: 0 !important; }
+      .jarvis-note {
+        margin: 6px 24px 10px;
+        padding: 12px 16px;
+        background: rgba(20, 20, 25, 0.85) !important;
+        backdrop-filter: blur(30px) saturate(180%);
+        -webkit-backdrop-filter: blur(30px) saturate(180%);
+        color: rgba(255, 255, 255, 0.92) !important;
+        border: 0.5px solid rgba(255, 255, 255, 0.12) !important;
+        border-left: 3px solid #ff9f0a !important;
+        border-radius: 12px !important;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif;
+        font-size: 13.5px;
+        font-weight: 500;
+        line-height: 1.45;
+        letter-spacing: -0.1px;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+      }
+      .jarvis-note .jarvis-note-icon {
+        flex-shrink: 0;
+        font-size: 14px;
+        line-height: 1.4;
+      }
+      .jarvis-note .jarvis-note-label {
+        font-weight: 600;
+        color: #ffb84d;
+        margin-right: 4px;
+        letter-spacing: 0.1px;
+        text-transform: lowercase;
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  function buildNote(text) {
+    const note = document.createElement('div');
+    note.className = 'jarvis-note';
+    note.innerHTML = `
+      <span class="jarvis-note-icon">⚡</span>
+      <div><span class="jarvis-note-label">agentverse reminder:</span>${text}</div>
+    `;
+    return note;
+  }
+
+  function addNoteAfterRow(row, text) {
+    if (!row?.parentNode) return;
+    let wrapper;
+    if (row.tagName === 'TR') {
+      wrapper = document.createElement('tr');
+      wrapper.className = 'jarvis-note-row';
+      const td = document.createElement('td');
+      td.colSpan = Math.max(row.children.length, 6);
+      td.appendChild(buildNote(text));
+      wrapper.appendChild(td);
+    } else {
+      wrapper = buildNote(text);
+      wrapper.classList.add('jarvis-note-block');
+    }
+    row.parentNode.insertBefore(wrapper, row.nextSibling);
+  }
+
+  function findRowForMeeting(meeting, rows) {
+    const patterns = timePatternsFor(meeting);
+    if (!patterns.length) return null;
+    const regex = new RegExp(`(?<![\\d:])(?:${patterns.join('|')})(?!\\w|:)`, 'gi');
+    return rows.find(row => {
+      regex.lastIndex = 0;
+      return regex.test(row.textContent);
+    });
+  }
+
+  function fmtTime(iso) {
+    try {
+      return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    } catch { return iso; }
+  }
+  function fmtMeetingTime(meeting) {
+    try {
+      return new Date(`${meeting.startDate}T${meeting.startTime}:00`)
+        .toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    } catch { return meeting.startTime; }
+  }
+
+  async function addContextualNotes(meetings, rows) {
+    if (!meetings?.length || !rows?.length) return;
+
+    // 1) Same-sender conflicting requests
+    const senders = [...new Set(meetings.map(m => m.attendeeEmail).filter(Boolean))];
+    if (meetings.length > 1 && senders.length === 1) {
+      const sender = senders[0];
+      const times = meetings.map(fmtMeetingTime).filter(Boolean).join(' and ');
+      addNoteAfterRow(rows[0], `conflicting scheduling requests from <b>${sender}</b> — ${times}`);
+    }
+
+    // 2) Calendar conflicts
+    let events = [];
+    try {
+      const res = await chrome.runtime.sendMessage({ type: 'GET_EVENTS' });
+      events = res?.events || [];
+    } catch { /* not authed or no calendar — silently skip */ }
+    if (!events.length) return;
+
+    for (const meeting of meetings) {
+      const meetingDt = new Date(`${meeting.startDate}T${meeting.startTime}:00`);
+      if (isNaN(meetingDt.getTime())) continue;
+      // Same-day events within ±2 hours of the proposed meeting
+      const conflict = events.find(ev => {
+        const evDt = new Date(ev.start);
+        if (isNaN(evDt.getTime())) return false;
+        const sameDay = evDt.toDateString() === meetingDt.toDateString();
+        const hoursApart = Math.abs(evDt - meetingDt) / 36e5;
+        return sameDay && hoursApart < 2;
+      });
+      if (!conflict) continue;
+      const row = findRowForMeeting(meeting, rows);
+      if (!row) continue;
+      addNoteAfterRow(row,
+        `you have <b>"${conflict.title}"</b> at ${fmtTime(conflict.start)} — this could pull you off track.`);
+    }
   }
 
   // Debug helpers — work across world boundaries via DOM CustomEvents.
