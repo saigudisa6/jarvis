@@ -166,6 +166,172 @@
     return base;
   }
 
+  // ── Email-row highlights ───────────────────────────────────────────────────────
+  // When JARVIS surfaces 2+ proposed meeting times from the same person, find the
+  // inbox rows containing those times and outline each in green — same color as
+  // the macro screen-edge glow. Cleared when the I'm in / Can't make it group
+  // goes away.
+
+  let _rowHighlightStylesInjected = false;
+  function ensureTimeHighlightStyles() {
+    if (_rowHighlightStylesInjected) return;
+    _rowHighlightStylesInjected = true;
+    const style = document.createElement('style');
+    style.id = 'jarvis-row-highlight-styles';
+    style.textContent = `
+      .jarvis-row-highlight {
+        outline: 2px solid rgba(72, 187, 120, 0.7) !important;
+        outline-offset: -2px !important;
+        background: rgba(72, 187, 120, 0.10) !important;
+        animation: jarvis-row-pulse 2.4s ease-in-out infinite !important;
+        position: relative;
+      }
+      .jarvis-row-highlight > td {
+        background: rgba(72, 187, 120, 0.10) !important;
+      }
+      @keyframes jarvis-row-pulse {
+        0%, 100% { outline-color: rgba(72, 187, 120, 0.55) !important; }
+        50%      { outline-color: rgba(154, 230, 180, 0.95) !important; }
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  function timePatternsFor(meeting) {
+    const [hStr, mStr] = (meeting.startTime || '').split(':');
+    const h24 = parseInt(hStr, 10);
+    const m   = parseInt(mStr, 10);
+    if (isNaN(h24)) return [];
+    const h12  = ((h24 + 11) % 12) + 1;
+    const ampm = h24 >= 12 ? 'pm' : 'am';
+    const mm   = String(m).padStart(2, '0');
+    const out  = [`${h12}:${mm}\\s*${ampm}`, `${h24}:${mm}`];
+    if (m === 0) out.push(`${h12}\\s*${ampm}`);
+    return out;
+  }
+
+  // Walk up from a text node's parent to the nearest "email row" container.
+  // Gmail uses <tr class="zA">; some apps use [role="listitem"] or [data-thread-id].
+  function findRowAncestor(el) {
+    let cur = el;
+    while (cur && cur !== document.body && cur.nodeType === 1) {
+      const tag = cur.tagName;
+      if (tag === 'TR') return cur;
+      if (cur.getAttribute) {
+        if (cur.getAttribute('role') === 'listitem') return cur;
+        if (cur.hasAttribute('data-thread-id')) return cur;
+        if (cur.hasAttribute('data-legacy-thread-id')) return cur;
+      }
+      // Gmail's email-row class
+      if (cur.classList && cur.classList.contains('zA')) return cur;
+      cur = cur.parentElement;
+    }
+    return null;
+  }
+
+  function findMatchingRows(meetings) {
+    const patterns = meetings.flatMap(timePatternsFor);
+    if (!patterns.length) return [];
+    const regex = new RegExp(`(?<![\\d:])(?:${patterns.join('|')})(?!\\w|:)`, 'gi');
+    const rows = new Set();
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        const p = node.parentElement;
+        if (!p) return NodeFilter.FILTER_REJECT;
+        if (p.closest('#jarvis-host, #jarvis-macros-host')) return NodeFilter.FILTER_REJECT;
+        const tag = p.tagName;
+        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT' || tag === 'IFRAME') {
+          return NodeFilter.FILTER_REJECT;
+        }
+        if (!node.textContent.trim()) return NodeFilter.FILTER_REJECT;
+        regex.lastIndex = 0;
+        return regex.test(node.textContent) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+      }
+    });
+    let n;
+    while ((n = walker.nextNode())) {
+      const row = findRowAncestor(n.parentElement);
+      if (row) rows.add(row);
+    }
+    return [...rows];
+  }
+
+  // Track active highlight session so a MutationObserver can re-apply when Gmail
+  // dynamically inserts a row (e.g. a brand-new email arriving while the prompt
+  // is already on screen).
+  let _activeHighlightMeetings = null;
+  let _highlightObserver = null;
+  let _highlightDebounce = null;
+
+  function startHighlightObserver() {
+    if (_highlightObserver) return;
+    _highlightObserver = new MutationObserver(() => {
+      if (!_activeHighlightMeetings) return;
+      clearTimeout(_highlightDebounce);
+      _highlightDebounce = setTimeout(() => {
+        if (!_activeHighlightMeetings) return;
+        const rows = findMatchingRows(_activeHighlightMeetings);
+        rows.forEach(r => r.classList.add('jarvis-row-highlight'));
+      }, 250);
+    });
+    _highlightObserver.observe(document.body, { childList: true, subtree: true });
+  }
+
+  function stopHighlightObserver() {
+    if (_highlightObserver) {
+      _highlightObserver.disconnect();
+      _highlightObserver = null;
+    }
+    clearTimeout(_highlightDebounce);
+    _highlightDebounce = null;
+  }
+
+  function highlightTimesInEmail(meetings) {
+    ensureTimeHighlightStyles();
+    const patterns = meetings.flatMap(timePatternsFor);
+    console.log('[JARVIS] highlightTimesInEmail meetings:', meetings, 'patterns:', patterns);
+    const rows = findMatchingRows(meetings);
+    rows.forEach(r => r.classList.add('jarvis-row-highlight'));
+    _activeHighlightMeetings = meetings;
+    startHighlightObserver();
+    console.log(`[JARVIS] highlighted ${rows.length} row(s); watching for new ones`);
+    return rows.length;
+  }
+
+  function clearTimeHighlights() {
+    _activeHighlightMeetings = null;
+    stopHighlightObserver();
+    document.querySelectorAll('.jarvis-row-highlight')
+      .forEach(el => el.classList.remove('jarvis-row-highlight'));
+  }
+
+  // Debug helpers — work across world boundaries via DOM CustomEvents.
+  // From any DevTools context (default page world OR extension context), call:
+  //   window.dispatchEvent(new CustomEvent('jarvis-highlight-test', { detail: { times: ['2pm','3:30pm','14:00'] } }))
+  //   window.dispatchEvent(new CustomEvent('jarvis-highlight-clear'))
+  function timesToMeetings(times) {
+    return (Array.isArray(times) ? times : [times]).map(t => {
+      let s = String(t).trim().toLowerCase();
+      const ampm = s.endsWith('pm') ? 'pm' : (s.endsWith('am') ? 'am' : null);
+      if (ampm) s = s.slice(0, -2).trim();
+      const [hStr, mStr = '0'] = s.split(':');
+      let h = parseInt(hStr, 10);
+      const m = parseInt(mStr, 10) || 0;
+      if (ampm === 'pm' && h < 12) h += 12;
+      if (ampm === 'am' && h === 12) h = 0;
+      return { startTime: `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`, startDate: '2099-01-01' };
+    });
+  }
+  window.addEventListener('jarvis-highlight-test', (e) => {
+    const meetings = timesToMeetings(e.detail?.times || []);
+    console.log('[JARVIS] test event received, meetings:', meetings);
+    highlightTimesInEmail(meetings);
+  });
+  window.addEventListener('jarvis-highlight-clear', () => clearTimeHighlights());
+  // Also expose direct functions for the JARVIS DevTools context
+  window.__jarvisHighlightTest  = (times) => highlightTimesInEmail(timesToMeetings(times));
+  window.__jarvisHighlightClear = clearTimeHighlights;
+
   function addMeetingGroup(meetings) {
     if (!meetings?.length) return;
 
@@ -205,6 +371,7 @@
           chrome.runtime.sendMessage({ type: 'MEETING_HANDLED', key: meetingKey(m) }).catch(() => {});
         });
         group.remove();
+        clearTimeHighlights();
 
         const thinking = addMsg('Adding to your calendar…', 'thinking');
         const res = await chrome.runtime.sendMessage({ type: 'CREATE_EVENT', event: meeting }).catch(() => null);
@@ -232,6 +399,7 @@
           addMsg(`Passed on it, but couldn't send the email: ${hint}`, 'alert');
         } else if (!group.querySelector('.jarvis-meeting-row')) {
           group.remove();
+          clearTimeHighlights();
           addMsg(meeting.attendeeEmail ? 'Passed on all of them — sent decline emails.' : 'Passed on all of them.', 'jarvis');
         } else {
           addMsg(meeting.attendeeEmail ? `Passed on that one — sent ${meeting.attendeeEmail} a note.` : 'Passed on that one.', 'jarvis');
@@ -248,6 +416,10 @@
 
     msgs.appendChild(group);
     msgs.scrollTop = msgs.scrollHeight;
+
+    // Outline the inbox row(s) for any meeting prompted with I'm in / Can't make it.
+    // Fires for single-meeting prompts too — the row is the new email.
+    highlightTimesInEmail(meetings);
   }
 
   function openPanel() {
