@@ -1,8 +1,8 @@
 // ── Config ─────────────────────────────────────────────────────────────────────
 // Fill these in from Google Cloud Console → Credentials → Web application
 // Authorized redirect URI: https://YOUR_EXTENSION_ID.chromiumapp.org/
-const GOOGLE_CLIENT_ID     = 'YOUR_GOOGLE_CLIENT_ID';
-const GOOGLE_CLIENT_SECRET = 'YOUR_GOOGLE_CLIENT_SECRET';
+const GOOGLE_CLIENT_ID     = 'Client ID';
+const GOOGLE_CLIENT_SECRET = 'Client Secret';
 const GOOGLE_SCOPES        = [
   'openid',
   'profile',
