@@ -61,13 +61,69 @@
   let lastAnalyzed  = 0;  // timestamp — prevents rapid double-fires on SPAs
 
   // ── Helpers ────────────────────────────────────────────────────────────────────
+  function stripMarkdown(text) {
+    return text
+      .replace(/\*\*(.+?)\*\*/g, '$1')   // **bold**
+      .replace(/\*(.+?)\*/g,     '$1')   // *italic*
+      .replace(/__(.+?)__/g,     '$1')   // __bold__
+      .replace(/_(.+?)_/g,       '$1')   // _italic_
+      .replace(/`(.+?)`/g,       '$1')   // `code`
+      .replace(/^#{1,6}\s+/gm,   '')     // # headings
+      .replace(/^\s*[-*]\s+/gm,  '• ')  // - bullets → •
+      .trim();
+  }
+
   function addMsg(text, type = 'jarvis') {
     const el       = document.createElement('div');
     el.className   = `jarvis-msg ${type}`;
-    el.textContent = text;
+    el.textContent = stripMarkdown(text);
     msgs.appendChild(el);
     msgs.scrollTop = msgs.scrollHeight;
     return el;
+  }
+
+  function addMeetingButtons(meeting) {
+    const mKey = `${meeting.startDate}:${meeting.startTime}`;
+
+    const wrap = document.createElement('div');
+    wrap.className = 'jarvis-actions';
+
+    const accept  = document.createElement('button');
+    accept.className   = 'jarvis-btn accept';
+    accept.textContent = "I'm in — add to calendar";
+
+    const decline = document.createElement('button');
+    decline.className   = 'jarvis-btn decline';
+    decline.textContent = "Can't make it";
+
+    const markHandled = () => {
+      chrome.runtime.sendMessage({ type: 'MEETING_HANDLED', key: mKey }).catch(() => {});
+    };
+
+    accept.addEventListener('click', async () => {
+      markHandled();
+      wrap.remove();
+      const thinking = addMsg('Adding to your calendar…', 'thinking');
+      const res = await chrome.runtime.sendMessage({ type: 'CREATE_EVENT', event: meeting }).catch(() => null);
+      thinking.remove();
+      if (res?.success) {
+        addMsg(`Done — "${meeting.title}" is on your calendar.`, 'jarvis');
+      } else {
+        addMsg(`Couldn't add it: ${res?.error || 'unknown error'}`, 'alert');
+      }
+      msgs.scrollTop = msgs.scrollHeight;
+    });
+
+    decline.addEventListener('click', () => {
+      markHandled();
+      wrap.remove();
+      addMsg("Got it, skipping that one.", 'jarvis');
+    });
+
+    wrap.appendChild(accept);
+    wrap.appendChild(decline);
+    msgs.appendChild(wrap);
+    msgs.scrollTop = msgs.scrollHeight;
   }
 
   function openPanel() {
@@ -118,6 +174,7 @@
       return;
     }
     addMsg(res.text, 'jarvis');
+    if (res.meeting) addMeetingButtons(res.meeting);
     history.push({ role: 'user', content: text }, { role: 'assistant', content: res.text });
     if (history.length > 20) history = history.slice(-20);
   }
@@ -127,18 +184,22 @@
 
   // ── Page analysis ──────────────────────────────────────────────────────────────
   async function analyze() {
-    // Debounce — ignore if we analyzed within the last 10 seconds (catches SPA double-fires)
-    if (Date.now() - lastAnalyzed < 10_000) return;
+    if (Date.now() - lastAnalyzed < 20_000) return;  // one analysis per 20s max
     lastAnalyzed = Date.now();
 
     status.textContent = 'analyzing…';
-    const res = await chrome.runtime.sendMessage({ type: 'ANALYZE_PAGE', context: pageContext() });
+    const res = await chrome.runtime.sendMessage({ type: 'ANALYZE_PAGE', context: pageContext() }).catch(() => null);
     status.textContent = 'ready';
 
-    const text = res?.text?.trim() || '';
-    const isClear = text.toLowerCase().startsWith('clear');
+    if (!res) return;
+    const text = res.error
+      ? (res.error.includes('no_key') ? 'Add your ASI:One key in the JARVIS popup.' : res.error)
+      : res.text?.trim() || '';
+    const msgType = res.error ? 'alert' : 'jarvis';
+    const isClear = !res.error && text.toLowerCase().startsWith('clear');
     if (text && !isClear) {
-      addMsg(text, 'jarvis');
+      addMsg(text, msgType);
+      if (res.meeting && !res.error) addMeetingButtons(res.meeting);
       flashDot();
       openPanel();
     }
@@ -155,15 +216,20 @@
     addMsg('Connect Google in the JARVIS popup to unlock email & calendar context.', 'alert');
     openPanel();
   } else {
-    setTimeout(analyze, 1500);
+    setTimeout(() => {
+      lastUrl      = location.href;  // absorb URL settling during page init
+      lastAnalyzed = 0;              // ensure first run always fires
+      analyze();
+    }, 1500);
   }
 
   // SPA navigation detection
   setInterval(() => {
     if (location.href !== lastUrl) {
-      lastUrl  = location.href;
-      history  = [];
+      lastUrl        = location.href;
+      history        = [];
       msgs.innerHTML = '';
+      lastAnalyzed   = 0;  // reset cooldown for new page
       if (ready) setTimeout(analyze, 1000);
     }
   }, 2000);
