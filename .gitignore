@@ -1,4 +1,5 @@
 # Secrets & tokens — never commit these
+extension/config.js
 credentials.json
 token.json
 calendar_token.json

@@ -1,8 +1,7 @@
 // ── Config ─────────────────────────────────────────────────────────────────────
-// Fill these in from Google Cloud Console → Credentials → Web application
+// Credentials live in config.js (gitignored). Copy config.example.js → config.js.
 // Authorized redirect URI: https://YOUR_EXTENSION_ID.chromiumapp.org/
-const GOOGLE_CLIENT_ID     = 'Client ID';
-const GOOGLE_CLIENT_SECRET = 'Client Secret';
+importScripts('config.js');
 const GOOGLE_SCOPES        = [
   'openid',
   'profile',
