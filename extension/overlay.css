@@ -207,6 +207,29 @@
 
 .jarvis-send:hover { background: #2b4a7a; }
 
+.jarvis-meeting-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+
+.jarvis-meeting-row {
+  background: #1e2d40;
+  border-left: 3px solid #63b3ed;
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.jarvis-meeting-time {
+  color: #e2e8f0;
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .jarvis-actions {
   display: flex;
   gap: 8px;

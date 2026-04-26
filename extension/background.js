@@ -7,6 +7,7 @@ const GOOGLE_SCOPES        = [
   'openid',
   'profile',
   'https://www.googleapis.com/auth/gmail.readonly',
+  'https://www.googleapis.com/auth/gmail.send',
   'https://www.googleapis.com/auth/calendar.events',
 ].join(' ');
 
@@ -108,6 +109,18 @@ async function generateChallenge(verifier) {
 
 // ── Gmail ──────────────────────────────────────────────────────────────────────
 
+function extractPlainText(payload) {
+  if (!payload) return '';
+  if (payload.mimeType === 'text/plain' && payload.body?.data) {
+    try { return atob(payload.body.data.replace(/-/g, '+').replace(/_/g, '/')); } catch {}
+  }
+  for (const part of payload.parts || []) {
+    const t = extractPlainText(part);
+    if (t) return t;
+  }
+  return '';
+}
+
 async function fetchEmails(query, maxResults = 10) {
   const token = await getGoogleToken();
   const list  = await gFetch(
@@ -117,16 +130,23 @@ async function fetchEmails(query, maxResults = 10) {
   if (!list.messages) return [];
 
   return Promise.all(list.messages.map(async m => {
-    const msg     = await gFetch(
-      `https://www.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From`,
+    const msg      = await gFetch(
+      `https://www.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=full`,
       token
     );
-    const headers = msg.payload?.headers || [];
+    const headers   = msg.payload?.headers || [];
+    const body      = extractPlainText(msg.payload).replace(/\s+/g, ' ').trim().slice(0, 600);
+    const fromFull  = headers.find(h => h.name === 'From')?.value || 'Unknown';
+    // Extract bare email address so AI doesn't have to parse "Name <email>"
+    const emailMatch = fromFull.match(/<([^>]+)>/) || fromFull.match(/(\S+@\S+)/);
+    const fromEmail  = emailMatch ? (emailMatch[1] || emailMatch[0]) : '';
     return {
-      id:      m.id,
-      subject: headers.find(h => h.name === 'Subject')?.value || 'No subject',
-      from:    headers.find(h => h.name === 'From')?.value    || 'Unknown',
-      snippet: msg.snippet || '',
+      id:        m.id,
+      subject:   headers.find(h => h.name === 'Subject')?.value || 'No subject',
+      from:      fromFull,
+      fromEmail,
+      snippet:   msg.snippet || '',
+      body,
     };
   }));
 }
@@ -214,7 +234,7 @@ async function fetchContext({ upcoming = false } = {}) {
   const events = eventRes.status === 'fulfilled' ? eventRes.value : [];
 
   const emailsText = emails.length
-    ? emails.map(e => `From: ${e.from}\nSubject: ${e.subject}\nPreview: ${e.snippet}`).join('\n---\n')
+    ? emails.map(e => `From: ${e.from}\nSenderEmail: ${e.fromEmail}\nSubject: ${e.subject}\nContent: ${e.body || e.snippet}`).join('\n---\n')
     : 'Inbox is clear.';
 
   const eventsText = events.length
@@ -228,7 +248,7 @@ async function fetchContext({ upcoming = false } = {}) {
       }).join('\n')
     : upcoming ? 'No events in the next 14 days.' : 'Nothing on the calendar today.';
 
-  return { emailsText, eventsText };
+  return { emailsText, eventsText, emails };
 }
 
 // ── Core intelligence ──────────────────────────────────────────────────────────
@@ -238,8 +258,19 @@ function localDateISO() {
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
+function parseTimeStr(str) {
+  const m = (str || '').trim().match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/i);
+  if (!m) return null;
+  let h = parseInt(m[1], 10);
+  const min = m[2] ? parseInt(m[2], 10) : 0;
+  const isPM = m[3].toLowerCase() === 'pm';
+  if (isPM && h !== 12) h += 12;
+  if (!isPM && h === 12) h = 0;
+  return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
+}
+
 async function analyzePageContext(pageInfo) {
-  const { emailsText, eventsText } = await fetchContext();
+  const { emailsText, eventsText, emails } = await fetchContext();
   const { user_name } = await chrome.storage.local.get('user_name');
   const name = user_name || 'you';
 
@@ -251,34 +282,90 @@ async function analyzePageContext(pageInfo) {
     const today    = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
     const todayISO = localDateISO();
 
-    const briefingSystem = `You are JARVIS, ${name}'s personal AI. Casual, like a friend texting. No asterisks, no bullet points. Talking TO ${name}. 1-2 sentences about who emailed and what they said. Use ONLY words from the email text — do not reword, do not mention the calendar, do not invent anything.`;
+    // Build reverse lookup: senderEmail → gmail message ID (for stable dedup keys)
+    const emailIdByAddress = {};
+    for (const e of emails) {
+      if (e.fromEmail) emailIdByAddress[e.fromEmail] = e.id;
+    }
 
-    const extractSystem = `Does any email below explicitly ask to meet at a specific time (e.g. "at 8pm", "3pm tomorrow")? If yes, respond with ONLY this JSON and nothing else:
-{"title":"<short title>","startDate":"${todayISO}","startTime":"HH:MM","durationMinutes":60,"attendeeEmail":"<sender email>"}
-If no explicit time exists, respond with exactly: null`;
+    // Single combined call — briefing + meeting extraction in one shot
+    const combinedSystem = `You are JARVIS, ${name}'s personal AI. Return ONLY a valid JSON object — no text outside it:
+{"briefing":"<string>","meetings":[]}
 
-    const emailContext = `Today: ${today} (${todayISO})\nEmails TO ${name}:\n${emailsText}`;
+briefing: 2-3 casual sentences to ${name} like a friend texting, no asterisks or bullet points. Mention EVERY email by the sender's first name and what they want.
 
-    const [text, meetingRaw] = await Promise.all([
-      callASI(briefingSystem, [{ role: 'user', content: `${emailContext}\n\nCalendar:\n${eventsText}` }]),
-      callASI(extractSystem,  [{ role: 'user', content: emailContext }]),
-    ]);
+meetings: for each email that mentions a specific time, add one object:
+{"title":"<use Subject line, or Meeting with [sender first name]>","startDate":"${todayISO}","startTime":"HH:MM","durationMinutes":60,"attendeeEmail":"<copy SenderEmail value exactly>"}
 
-    let meeting = null;
-    const trimmed = (meetingRaw || '').trim().replace(/^```json\s*/i, '').replace(/```\s*$/, '').trim();
-    if (trimmed && trimmed !== 'null') {
-      try { meeting = JSON.parse(trimmed); } catch {
-        const m = trimmed.match(/\{[\s\S]*\}/);
-        if (m) { try { meeting = JSON.parse(m[0]); } catch {} }
+CRITICAL:
+- Return ONLY the JSON object. First char = { last char = }.
+- Today is ${todayISO}. Use this date unless the email names a specific future date.
+- Check BOTH Subject AND Content of every email for times.
+- 12h → 24h: 4:45am=04:45, 11pm=23:00, 11:45pm=23:45.
+- attendeeEmail = copy the SenderEmail field exactly, no changes.`;
+
+    const emailContext = `Today: ${today} (${todayISO})\nEmails TO ${name}:\n${emailsText}\n\nCalendar:\n${eventsText}`;
+
+    const raw = await callASI(combinedSystem, [{ role: 'user', content: emailContext }]);
+
+    // Parse combined response — be forgiving about model formatting
+    let text = '';
+    let candidates = [];
+    const cleanRaw = (raw || '').trim()
+      .replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/```\s*$/, '').trim();
+    try {
+      const parsed = JSON.parse(cleanRaw);
+      text = parsed.briefing || '';
+      if (Array.isArray(parsed.meetings)) candidates = parsed.meetings;
+    } catch {
+      const objMatch = cleanRaw.match(/\{[\s\S]*\}/);
+      if (objMatch) {
+        try {
+          const parsed = JSON.parse(objMatch[0]);
+          text = parsed.briefing || '';
+          if (Array.isArray(parsed.meetings)) candidates = parsed.meetings;
+        } catch {}
+      }
+      if (!text) text = raw; // last resort: show raw response
+    }
+
+    // Regex fallback — if AI returned [] but emails clearly contain meeting times
+    if (!candidates.length) {
+      for (const e of emails) {
+        const fullText = `${e.subject} ${e.body || e.snippet}`;
+        const tMatch   = fullText.match(/\b(\d{1,2}(?::\d{2})?\s*(?:am|pm))\b/i);
+        if (tMatch && /\b(meet(?:ing)?|call|sync|chat|zoom)\b/i.test(fullText)) {
+          const t24 = parseTimeStr(tMatch[1]);
+          if (t24) candidates.push({
+            title:           e.subject || `Meeting with ${e.from.split(' ')[0]}`,
+            startDate:       todayISO,
+            startTime:       t24,
+            durationMinutes: 60,
+            attendeeEmail:   e.fromEmail,
+          });
+        }
       }
     }
 
-    if (meeting) {
-      const mKey = `${meeting.startDate}:${meeting.startTime}`;
-      if (handledMeetingKeys.has(mKey)) meeting = null;
+    // Correct any past dates to today
+    const todayStr = localDateISO();
+    for (const c of candidates) {
+      if (c.startDate < todayStr) c.startDate = todayStr;
     }
 
-    return { text, meeting };
+    // Filter already-handled meetings — key on gmail message ID so same email is never re-asked
+    const meetings = [];
+    for (const c of candidates) {
+      const emailId = emailIdByAddress[c.attendeeEmail] || null;
+      const mKey    = emailId
+        ? `${emailId}:${c.startDate}:${c.startTime}`
+        : (c.attendeeEmail ? `${c.attendeeEmail}:${c.startDate}:${c.startTime}` : `${c.startDate}:${c.startTime}`);
+      if (!await isMeetingHandled(mKey)) {
+        meetings.push({ ...c, emailId });
+      }
+    }
+
+    return { text, meetings };
   }
 
   const system = `You are JARVIS, ${name}'s personal AI. Casual, sharp, like a friend texting. No asterisks, no bullet points. You are talking TO ${name}.
@@ -330,8 +417,10 @@ ${eventsText}`;
 
   let meeting = parsed.meeting || null;
   if (meeting) {
-    const mKey = `${meeting.startDate}:${meeting.startTime}`;
-    if (handledMeetingKeys.has(mKey)) meeting = null;
+    const mKey = meeting.attendeeEmail
+      ? `${meeting.attendeeEmail}:${meeting.startDate}:${meeting.startTime}`
+      : `${meeting.startDate}:${meeting.startTime}`;
+    if (await isMeetingHandled(mKey)) meeting = null;
   }
 
   return { text: parsed.text || raw, meeting };
@@ -417,19 +506,58 @@ async function proactiveCheck() {
   await Promise.allSettled([checkNewEmails(), checkMeetings()]);
 }
 
+// ── Gmail send ────────────────────────────────────────────────────────────────
+
+async function sendDeclineEmail(toEmail, meeting) {
+  if (!toEmail) return;
+  // Strip display name if present: "Name <email@x.com>" → "email@x.com"
+  const cleanTo = (toEmail.match(/<([^>]+)>/) || toEmail.match(/(\S+@\S+)/))?.[1] || toEmail;
+  toEmail = cleanTo;
+  const token = await getGoogleToken();
+  const { user_name } = await chrome.storage.local.get('user_name');
+  const name = user_name || 'me';
+
+  const timeLabel = (() => {
+    try {
+      return new Date(`${meeting.startDate}T${meeting.startTime}:00`)
+        .toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    } catch { return meeting.startTime || 'that time'; }
+  })();
+
+  const subject = `Re: ${meeting.title || 'Meeting'}`;
+  const body    = `Hey, thanks for reaching out! Unfortunately I won't be able to make it at ${timeLabel}. Hope we can find another time that works!\n\n— ${name}`;
+
+  const raw = [
+    `To: ${toEmail}`,
+    `Subject: ${subject}`,
+    'Content-Type: text/plain; charset=utf-8',
+    'MIME-Version: 1.0',
+    '',
+    body,
+  ].join('\r\n');
+
+  const bytes   = new TextEncoder().encode(raw);
+  let binary    = '';
+  bytes.forEach(b => { binary += String.fromCharCode(b); });
+  const encoded = btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+
+  const res  = await fetch('https://www.googleapis.com/gmail/v1/users/me/messages/send', {
+    method:  'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ raw: encoded }),
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message || 'Gmail send error');
+  return data;
+}
+
 // ── Calendar event creation ────────────────────────────────────────────────────
 
 async function createCalendarEvent({ title, startDate, startTime, durationMinutes = 60, attendeeEmail }) {
   const token = await getGoogleToken();
   const tz    = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  let start   = new Date(`${startDate}T${startTime}:00`);
-
-  // Only bump if the event is more than 20 hours in the past (clearly stale date from old email)
-  if (start < new Date(Date.now() - 20 * 60 * 60 * 1000)) {
-    start.setDate(start.getDate() + 1);
-  }
-
-  const end = new Date(start.getTime() + durationMinutes * 60_000);
+  const start = new Date(`${startDate}T${startTime}:00`);
+  const end   = new Date(start.getTime() + durationMinutes * 60_000);
 
   const event = {
     summary: title,
@@ -458,9 +586,45 @@ function parseMeetingJSON(raw) {
   return { text: raw, meeting: null };
 }
 
-// ── Handled meeting tracking (session-scoped, prevents re-prompting) ───────────
+// ── Handled meeting tracking (persisted, survives SW restarts) ────────────────
 
-const handledMeetingKeys = new Set();
+async function isMeetingHandled(key) {
+  const today  = localDateISO();
+  const stored = await chrome.storage.local.get(['handledMeetings', 'handledMeetingsDate']);
+  // New day → clear stale decisions so fresh meeting requests can surface
+  if (stored.handledMeetingsDate !== today) {
+    await chrome.storage.local.set({ handledMeetings: [], handledMeetingsDate: today });
+    return false;
+  }
+  return (stored.handledMeetings || []).includes(key);
+}
+
+async function markMeetingHandled(key) {
+  const today  = localDateISO();
+  const stored = await chrome.storage.local.get(['handledMeetings', 'handledMeetingsDate']);
+  const list   = stored.handledMeetingsDate === today ? (stored.handledMeetings || []) : [];
+  await chrome.storage.local.set({
+    handledMeetings:     [...new Set([...list, key])].slice(-100),
+    handledMeetingsDate: today,
+  });
+}
+
+// Check Google Calendar — returns true if an event already exists within 30 min of the proposed time
+async function meetingExistsOnCalendar(startDate, startTime) {
+  try {
+    const token = await getGoogleToken();
+    const start = new Date(`${startDate}T${startTime}:00`);
+    const lo    = new Date(start.getTime() - 30 * 60_000);
+    const hi    = new Date(start.getTime() + 30 * 60_000);
+    const data  = await gFetch(
+      `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${lo.toISOString()}&timeMax=${hi.toISOString()}&singleEvents=true`,
+      token
+    );
+    return (data.items || []).length > 0;
+  } catch {
+    return false;
+  }
+}
 
 // ── Message listener ───────────────────────────────────────────────────────────
 
@@ -469,7 +633,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     analyzePageContext(message.context)
       .then(result => {
         if (typeof result === 'string') return sendResponse({ text: result });
-        sendResponse({ text: result.text, meeting: result.meeting });
+        sendResponse({ text: result.text, meetings: result.meetings || [] });
       })
       .catch(err => sendResponse({ error: err.message }));
     return true;
@@ -481,13 +645,21 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message.type === 'MEETING_HANDLED') {
-    handledMeetingKeys.add(message.key);
-    sendResponse({});
+    markMeetingHandled(message.key).then(() => sendResponse({}));
+    return true;
+  }
+  if (message.type === 'DECLINE_MEETING') {
+    const { key, meeting } = message;
+    Promise.all([
+      markMeetingHandled(key),
+      meeting?.attendeeEmail ? sendDeclineEmail(meeting.attendeeEmail, meeting) : Promise.resolve(),
+    ]).then(() => sendResponse({ success: true }))
+      .catch(err => sendResponse({ error: err.message }));
     return true;
   }
   if (message.type === 'CHAT') {
     chatWithJarvis(message.text, message.history || [])
-      .then(result => sendResponse({ text: result.text, meeting: result.meeting }))
+      .then(result => sendResponse({ text: result.text, meetings: result.meeting ? [result.meeting] : [] }))
       .catch(err   => sendResponse({ error: err.message }));
     return true;
   }
@@ -515,9 +687,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 // ── Alarms ─────────────────────────────────────────────────────────────────────
-
-// On startup, wipe seen list so any existing unread emails get a fresh triage pass
-chrome.storage.local.remove('seenEmailIds');
 
 chrome.alarms.create('proactive', { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener(alarm => {

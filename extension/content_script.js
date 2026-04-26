@@ -82,47 +82,94 @@
     return el;
   }
 
-  function addMeetingButtons(meeting) {
-    const mKey = `${meeting.startDate}:${meeting.startTime}`;
+  function meetingKey(m) {
+    const base = `${m.startDate}:${m.startTime}`;
+    if (m.emailId)       return `${m.emailId}:${base}`;
+    if (m.attendeeEmail) return `${m.attendeeEmail}:${base}`;
+    return base;
+  }
 
-    const wrap = document.createElement('div');
-    wrap.className = 'jarvis-actions';
+  function addMeetingGroup(meetings) {
+    if (!meetings?.length) return;
 
-    const accept  = document.createElement('button');
-    accept.className   = 'jarvis-btn accept';
-    accept.textContent = "I'm in — add to calendar";
+    const group = document.createElement('div');
+    group.className = 'jarvis-meeting-group';
 
-    const decline = document.createElement('button');
-    decline.className   = 'jarvis-btn decline';
-    decline.textContent = "Can't make it";
+    meetings.forEach(meeting => {
+      const mKey = meetingKey(meeting);
+      const t    = new Date(`${meeting.startDate}T${meeting.startTime}:00`);
+      const label = t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) +
+                    (meeting.title ? ` — ${meeting.title}` : '');
 
-    const markHandled = () => {
-      chrome.runtime.sendMessage({ type: 'MEETING_HANDLED', key: mKey }).catch(() => {});
-    };
+      const row = document.createElement('div');
+      row.className = 'jarvis-meeting-row';
 
-    accept.addEventListener('click', async () => {
-      markHandled();
-      wrap.remove();
-      const thinking = addMsg('Adding to your calendar…', 'thinking');
-      const res = await chrome.runtime.sendMessage({ type: 'CREATE_EVENT', event: meeting }).catch(() => null);
-      thinking.remove();
-      if (res?.success) {
-        addMsg(`Done — "${meeting.title}" is on your calendar.`, 'jarvis');
-      } else {
-        addMsg(`Couldn't add it: ${res?.error || 'unknown error'}`, 'alert');
-      }
-      msgs.scrollTop = msgs.scrollHeight;
+      const timeEl = document.createElement('div');
+      timeEl.className   = 'jarvis-meeting-time';
+      timeEl.textContent = label;
+
+      const actions = document.createElement('div');
+      actions.className = 'jarvis-actions';
+
+      const accept  = document.createElement('button');
+      accept.className   = 'jarvis-btn accept';
+      accept.textContent = "I'm in";
+
+      const decline = document.createElement('button');
+      decline.className   = 'jarvis-btn decline';
+      decline.textContent = "Can't make it";
+
+      accept.addEventListener('click', async () => {
+        // Disable immediately to prevent double-clicks
+        accept.disabled = true;
+        decline.disabled = true;
+        // Mark every meeting in the group as handled
+        meetings.forEach(m => {
+          chrome.runtime.sendMessage({ type: 'MEETING_HANDLED', key: meetingKey(m) }).catch(() => {});
+        });
+        group.remove();
+
+        const thinking = addMsg('Adding to your calendar…', 'thinking');
+        const res = await chrome.runtime.sendMessage({ type: 'CREATE_EVENT', event: meeting }).catch(() => null);
+        thinking.remove();
+        if (res?.success) {
+          const others = meetings.length > 1 ? ` Passed on the other ${meetings.length - 1}.` : '';
+          addMsg(`Done — "${meeting.title}" is on your calendar.${others}`, 'jarvis');
+        } else {
+          const err = res?.error || 'unknown error';
+          const hint = err.toLowerCase().includes('scope') || err.toLowerCase().includes('auth')
+            ? 'Reconnect Google in the JARVIS popup.' : err;
+          addMsg(`Couldn't add it: ${hint}`, 'alert');
+        }
+        msgs.scrollTop = msgs.scrollHeight;
+      });
+
+      decline.addEventListener('click', async () => {
+        decline.disabled = true;
+        accept.disabled  = true;
+        const res = await chrome.runtime.sendMessage({ type: 'DECLINE_MEETING', key: mKey, meeting }).catch(() => null);
+        row.remove();
+        if (res?.error) {
+          const hint = res.error.toLowerCase().includes('scope') || res.error.toLowerCase().includes('auth')
+            ? 'Reconnect Google in the JARVIS popup to enable email sending.' : res.error;
+          addMsg(`Passed on it, but couldn't send the email: ${hint}`, 'alert');
+        } else if (!group.querySelector('.jarvis-meeting-row')) {
+          group.remove();
+          addMsg(meeting.attendeeEmail ? 'Passed on all of them — sent decline emails.' : 'Passed on all of them.', 'jarvis');
+        } else {
+          addMsg(meeting.attendeeEmail ? `Passed on that one — sent ${meeting.attendeeEmail} a note.` : 'Passed on that one.', 'jarvis');
+        }
+        msgs.scrollTop = msgs.scrollHeight;
+      });
+
+      actions.appendChild(accept);
+      actions.appendChild(decline);
+      row.appendChild(timeEl);
+      row.appendChild(actions);
+      group.appendChild(row);
     });
 
-    decline.addEventListener('click', () => {
-      markHandled();
-      wrap.remove();
-      addMsg("Got it, skipping that one.", 'jarvis');
-    });
-
-    wrap.appendChild(accept);
-    wrap.appendChild(decline);
-    msgs.appendChild(wrap);
+    msgs.appendChild(group);
     msgs.scrollTop = msgs.scrollHeight;
   }
 
@@ -174,7 +221,7 @@
       return;
     }
     addMsg(res.text, 'jarvis');
-    if (res.meeting) addMeetingButtons(res.meeting);
+    if (res.meetings?.length) addMeetingGroup(res.meetings);
     history.push({ role: 'user', content: text }, { role: 'assistant', content: res.text });
     if (history.length > 20) history = history.slice(-20);
   }
@@ -199,7 +246,7 @@
     const isClear = !res.error && text.toLowerCase().startsWith('clear');
     if (text && !isClear) {
       addMsg(text, msgType);
-      if (res.meeting && !res.error) addMeetingButtons(res.meeting);
+      if (res.meetings?.length && !res.error) addMeetingGroup(res.meetings);
       flashDot();
       openPanel();
     }
