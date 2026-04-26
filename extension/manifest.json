@@ -30,6 +30,12 @@
       "js": ["content_script.js"],
       "run_at": "document_end",
       "all_frames": false
+    },
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["macros.js"],
+      "run_at": "document_end",
+      "all_frames": false
     }
   ],
   "action": {
