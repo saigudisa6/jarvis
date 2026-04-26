@@ -9,11 +9,14 @@
     "tabs",
     "activeTab",
     "alarms",
-    "notifications"
+    "notifications",
+    "geolocation"
   ],
   "host_permissions": [
     "https://www.googleapis.com/*",
-    "https://api.asi1.ai/*"
+    "https://api.asi1.ai/*",
+    "https://ipinfo.io/*",
+    "http://127.0.0.1:9000/*"
   ],
   "web_accessible_resources": [
     {

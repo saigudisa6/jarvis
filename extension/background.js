@@ -8,6 +8,12 @@ const GOOGLE_SCOPES        = [
   'https://www.googleapis.com/auth/calendar.readonly',
 ].join(' ');
 
+// Local Jarvis Agent Configuration
+const LOCAL_ORCHESTRATOR_URL = 'http://localhost:8000/submit';
+const LOCAL_RESTAURANT_AGENT_URL = 'http://localhost:8001/submit';
+const JARVIS_BRIDGE_URL = 'http://127.0.0.1:9000/restaurant-search';
+const DEFAULT_USER_ID = 'extension_user';
+
 // ── Google OAuth ───────────────────────────────────────────────────────────────
 
 async function getGoogleToken(interactive = false) {
@@ -321,7 +327,70 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     });
     return true;
   }
+  if (message.type === 'RESTAURANT_SEARCH') {
+    handleRestaurantSearch(message.query, message.latitude, message.longitude)
+      .then(recommendations => sendResponse({ success: true, recommendations }))
+      .catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
 });
+
+// ── Restaurant Search Handler ──────────────────────────────────────────────────
+
+async function handleRestaurantSearch(searchQuery, latitude, longitude) {
+  console.log(`\n🍽️ [JARVIS Restaurant Agent] Processing search: "${searchQuery}"`);
+
+  try {
+    const request = {
+      query: searchQuery,
+      user_id: DEFAULT_USER_ID,
+    };
+    if (latitude != null && longitude != null) {
+      request.latitude  = latitude;
+      request.longitude = longitude;
+    }
+    
+    console.log(`📡 Connecting to Jarvis Bridge server...`);
+    
+    // Send request to bridge server
+    const response = await fetch(JARVIS_BRIDGE_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request)
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Bridge server responded with status ${response.status}`);
+    }
+    
+    const recommendations = await response.json();
+    
+    // Log results to console/terminal
+    if (recommendations.success) {
+      console.log(`✅ Found ${recommendations.restaurants.length} restaurant recommendations:\n`);
+      
+      recommendations.restaurants.forEach((rest, i) => {
+        console.log(`  ${i + 1}. ${rest.name}`);
+        console.log(`     ⭐ Rating: ${rest.rating}★ | 💰 Price Level: ${rest.price_level}/4 | 📊 Score: ${rest.score?.toFixed(2) || 'N/A'}`);
+        console.log(`     📍 ${rest.address}`);
+        if (rest.website) console.log(`     🌐 ${rest.website}`);
+        console.log();
+      });
+      
+      console.log(`Message: ${recommendations.message}\n`);
+    } else {
+      console.error(`❌ Failed to get recommendations: ${recommendations.error}`);
+    }
+    
+    return recommendations;
+    
+  } catch (error) {
+    console.error(`❌ [JARVIS] Restaurant search error: ${error.message}`);
+    console.log('💡 Tip: Make sure the Jarvis Bridge server is running on port 9000');
+    console.log('   Run: python extension_bridge.py');
+    throw error;
+  }
+}
 
 // ── Alarms ─────────────────────────────────────────────────────────────────────
 

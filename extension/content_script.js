@@ -48,6 +48,78 @@
   const q      = id => shadow.getElementById(id);
   const panel  = q('panel');
   const bubble = q('bubble');
+
+  // ── Restaurant Search Detection ─────────────────────────────────────────────────
+  // Listen for Google search queries and detect if user is searching for restaurants
+  function detectRestaurantSearch() {
+    const currentUrl = window.location.href;
+    
+    // Only trigger on Google Search results
+    if (!currentUrl.includes('google.com/search') && 
+        !currentUrl.includes('google.com/maps') &&
+        !currentUrl.includes('google.com/localservices')) {
+      return;
+    }
+
+    // Extract search query from URL
+    const urlParams = new URLSearchParams(window.location.search);
+    const searchQuery = urlParams.get('q');
+    
+    if (!searchQuery) return;
+
+    // Keywords that indicate food/restaurant search
+    const foodKeywords = [
+      'restaurant', 'food', 'eat', 'dining', 'lunch', 'dinner', 'breakfast',
+      'cafe', 'coffee', 'pizza', 'sushi', 'burger', 'thai', 'italian', 
+      'mexican', 'chinese', 'indian', 'ramen', 'pho', 'BBQ', 'steak',
+      'vegan', 'vegetarian', 'breakfast spots', 'brunch', 'dessert',
+      'bakery', 'taco', 'french', 'greek', 'korean', 'japanese'
+    ];
+
+    const queryLower = searchQuery.toLowerCase();
+    const isRestaurantSearch = foodKeywords.some(keyword => queryLower.includes(keyword));
+    
+    if (isRestaurantSearch) {
+      console.log(`🍽️ [JARVIS] Restaurant search detected: "${searchQuery}"`);
+
+      function sendRestaurantMsg(lat, lng) {
+        const msg = { type: 'RESTAURANT_SEARCH', query: searchQuery };
+        if (lat != null && lng != null) { msg.latitude = lat; msg.longitude = lng; }
+        chrome.runtime.sendMessage(msg);
+      }
+
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          pos => sendRestaurantMsg(pos.coords.latitude, pos.coords.longitude),
+          ()  => sendRestaurantMsg(null, null),
+          { timeout: 5000, maximumAge: 300000 }
+        );
+      } else {
+        sendRestaurantMsg(null, null);
+      }
+    }
+  }
+
+  // Check for restaurant search on page load and when URL changes
+  detectRestaurantSearch();
+  
+  // Monitor for navigation changes (SPA)
+  const originalPushState = history.pushState;
+  const originalReplaceState = history.replaceState;
+  
+  history.pushState = function(...args) {
+    originalPushState.apply(history, args);
+    setTimeout(detectRestaurantSearch, 500);
+    return args[2];
+  };
+  
+  history.replaceState = function(...args) {
+    originalReplaceState.apply(history, args);
+    setTimeout(detectRestaurantSearch, 500);
+    return args[2];
+  };
+
+  window.addEventListener('popstate', detectRestaurantSearch);
   const dot    = q('dot');
   const msgs   = q('msgs');
   const input  = q('input');
