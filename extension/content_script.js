@@ -85,7 +85,12 @@
       function sendRestaurantMsg(lat, lng) {
         const msg = { type: 'RESTAURANT_SEARCH', query: searchQuery };
         if (lat != null && lng != null) { msg.latitude = lat; msg.longitude = lng; }
-        chrome.runtime.sendMessage(msg);
+        chrome.runtime.sendMessage(msg, response => {
+          if (chrome.runtime.lastError || !response?.success) return;
+          if (response.recommendations?.restaurants?.length) {
+            displayRestaurantResults(searchQuery, response.recommendations);
+          }
+        });
       }
 
       if (navigator.geolocation) {
@@ -127,7 +132,7 @@
 
   // ── State ──────────────────────────────────────────────────────────────────────
   let open          = false;
-  let history       = [];
+  let chatHistory   = [];
   let lastUrl       = location.href;
   let ready         = false;
   let lastAnalyzed  = 0;  // timestamp — prevents rapid double-fires on SPAs
@@ -237,7 +242,7 @@
     const thinking = addMsg('Thinking…', 'thinking');
     status.textContent = 'thinking…';
 
-    const res = await chrome.runtime.sendMessage({ type: 'CHAT', text, history });
+    const res = await chrome.runtime.sendMessage({ type: 'CHAT', text, history: chatHistory });
     thinking.remove();
     status.textContent = 'ready';
 
@@ -247,8 +252,8 @@
     }
     addMsg(res.text, 'jarvis');
     if (res.meeting) addMeetingButtons(res.meeting);
-    history.push({ role: 'user', content: text }, { role: 'assistant', content: res.text });
-    if (history.length > 20) history = history.slice(-20);
+    chatHistory.push({ role: 'user', content: text }, { role: 'assistant', content: res.text });
+    if (chatHistory.length > 20) chatHistory = chatHistory.slice(-20);
   }
 
   q('send-btn').addEventListener('click', () => send(input.value));
@@ -277,6 +282,28 @@
     }
   }
 
+  // ── Restaurant Results Display ─────────────────────────────────────────────────
+  function displayRestaurantResults(query, data) {
+    const restaurants = data.restaurants || [];
+    if (!restaurants.length) return;
+
+    addMsg(`🍽️ Top picks near you for "${query}"`, 'jarvis');
+
+    restaurants.forEach((r, i) => {
+      const price = r.price_level ? '$'.repeat(r.price_level) : '$$';
+      const open  = r.open_now === true ? 'Open now' : r.open_now === false ? 'Closed' : '';
+      const meta  = [r.rating ? `${r.rating}★` : null, price, open].filter(Boolean).join('  ·  ');
+      const match = r.score != null ? `${Math.round(r.score * 100)}% match` : '';
+      const why   = (r.reasons || []).join(' · ');
+      const footer = [match, why].filter(Boolean).join(' — ');
+
+      addMsg(`${i + 1}. ${r.name}\n${meta}\n${r.address}${footer ? '\n' + footer : ''}`, 'jarvis');
+    });
+
+    flashDot();
+    openPanel();
+  }
+
   // ── Boot ───────────────────────────────────────────────────────────────────────
   const statusRes = await chrome.runtime.sendMessage({ type: 'GET_STATUS' }).catch(() => ({}));
   ready = !!statusRes?.ready;
@@ -299,7 +326,7 @@
   setInterval(() => {
     if (location.href !== lastUrl) {
       lastUrl        = location.href;
-      history        = [];
+      chatHistory    = [];
       msgs.innerHTML = '';
       lastAnalyzed   = 0;  // reset cooldown for new page
       if (ready) setTimeout(analyze, 1000);
