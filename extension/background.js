@@ -4,8 +4,10 @@
 const GOOGLE_CLIENT_ID     = 'YOUR_GOOGLE_CLIENT_ID';
 const GOOGLE_CLIENT_SECRET = 'YOUR_GOOGLE_CLIENT_SECRET';
 const GOOGLE_SCOPES        = [
+  'openid',
+  'profile',
   'https://www.googleapis.com/auth/gmail.readonly',
-  'https://www.googleapis.com/auth/calendar.readonly',
+  'https://www.googleapis.com/auth/calendar.events',
 ].join(' ');
 
 // Local Jarvis Agent Configuration
@@ -88,6 +90,15 @@ async function launchGoogleOAuth() {
     g_refresh_token: tokens.refresh_token,
     g_expiry:        Date.now() + tokens.expires_in * 1000,
   });
+
+  // Fetch and cache user's real name for prompts
+  try {
+    const profile = await fetch('https://www.googleapis.com/userinfo/v2/me', {
+      headers: { Authorization: `Bearer ${tokens.access_token}` },
+    }).then(r => r.json());
+    if (profile.given_name) await chrome.storage.local.set({ user_name: profile.given_name });
+  } catch {}
+
   return tokens.access_token;
 }
 
@@ -103,10 +114,10 @@ async function generateChallenge(verifier) {
 
 // ── Gmail ──────────────────────────────────────────────────────────────────────
 
-async function getUnreadEmails(maxResults = 8) {
+async function fetchEmails(query, maxResults = 10) {
   const token = await getGoogleToken();
   const list  = await gFetch(
-    `https://www.googleapis.com/gmail/v1/users/me/messages?q=is:unread+newer_than:1d&maxResults=${maxResults}`,
+    `https://www.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(query)}&maxResults=${maxResults}`,
     token
   );
   if (!list.messages) return [];
@@ -118,11 +129,22 @@ async function getUnreadEmails(maxResults = 8) {
     );
     const headers = msg.payload?.headers || [];
     return {
+      id:      m.id,
       subject: headers.find(h => h.name === 'Subject')?.value || 'No subject',
       from:    headers.find(h => h.name === 'From')?.value    || 'Unknown',
       snippet: msg.snippet || '',
     };
   }));
+}
+
+// For briefing context: recent emails (read OR unread) so nothing slips through
+async function getRecentEmails(maxResults = 10) {
+  return fetchEmails('newer_than:2d -category:promotions -category:updates', maxResults);
+}
+
+// For proactive triage: only unread
+async function getUnreadEmails(maxResults = 15) {
+  return fetchEmails('is:unread newer_than:1d', maxResults);
 }
 
 // ── Calendar ───────────────────────────────────────────────────────────────────
@@ -133,6 +155,22 @@ async function getTodayEvents() {
   const dayEnd = new Date(now); dayEnd.setHours(23, 59, 59);
   const data   = await gFetch(
     `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${now.toISOString()}&timeMax=${dayEnd.toISOString()}&singleEvents=true&orderBy=startTime`,
+    token
+  );
+  return (data.items || []).map(e => ({
+    title:     e.summary || 'Untitled',
+    start:     e.start?.dateTime || e.start?.date || '',
+    attendees: (e.attendees || []).filter(a => !a.self).map(a => a.email),
+  }));
+}
+
+async function getUpcomingEvents(days = 14) {
+  const token = await getGoogleToken();
+  const now   = new Date();
+  const end   = new Date(now);
+  end.setDate(end.getDate() + days);
+  const data  = await gFetch(
+    `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${now.toISOString()}&timeMax=${end.toISOString()}&singleEvents=true&orderBy=startTime&maxResults=30`,
     token
   );
   return (data.items || []).map(e => ({
@@ -173,76 +211,145 @@ async function callASI(system, messages) {
 
 // ── Context builders ───────────────────────────────────────────────────────────
 
-async function fetchContext() {
-  const [emailRes, eventRes] = await Promise.allSettled([getUnreadEmails(), getTodayEvents()]);
-  const emails = emailRes.status  === 'fulfilled' ? emailRes.value  : [];
-  const events = eventRes.status  === 'fulfilled' ? eventRes.value  : [];
+async function fetchContext({ upcoming = false } = {}) {
+  const [emailRes, eventRes] = await Promise.allSettled([
+    getRecentEmails(),
+    upcoming ? getUpcomingEvents() : getTodayEvents(),
+  ]);
+  const emails = emailRes.status === 'fulfilled' ? emailRes.value : [];
+  const events = eventRes.status === 'fulfilled' ? eventRes.value : [];
 
   const emailsText = emails.length
-    ? emails.map(e => `• From: ${e.from}\n  Subject: ${e.subject}\n  Preview: ${e.snippet}`).join('\n')
-    : 'No unread emails today.';
+    ? emails.map(e => `From: ${e.from}\nSubject: ${e.subject}\nPreview: ${e.snippet}`).join('\n---\n')
+    : 'Inbox is clear.';
 
   const eventsText = events.length
     ? events.map(e => {
-        const t    = new Date(e.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        const soon = minutesUntil(e.start) > 0 && minutesUntil(e.start) < 60
-          ? ` ⚡ in ${Math.round(minutesUntil(e.start))} min` : '';
-        return `• ${t}: ${e.title}${soon}`;
+        const d    = new Date(e.start);
+        const date = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+        const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const soon = !upcoming && minutesUntil(e.start) > 0 && minutesUntil(e.start) < 60
+          ? ` (in ${Math.round(minutesUntil(e.start))} min)` : '';
+        return upcoming ? `${date} ${time}: ${e.title}` : `${time}: ${e.title}${soon}`;
       }).join('\n')
-    : 'No more events today.';
+    : upcoming ? 'No events in the next 14 days.' : 'Nothing on the calendar today.';
 
   return { emailsText, eventsText };
 }
 
 // ── Core intelligence ──────────────────────────────────────────────────────────
 
+function localDateISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
 async function analyzePageContext(pageInfo) {
   const { emailsText, eventsText } = await fetchContext();
+  const { user_name } = await chrome.storage.local.get('user_name');
+  const name = user_name || 'you';
 
-  const system = `You are JARVIS, the user's personal AI assistant living in their browser. Every time they navigate to a page, give them a genuinely useful briefing. Cover all of these that apply:
+  const isGmail    = pageInfo.url.includes('mail.google.com');
+  const isCalendar = pageInfo.url.includes('calendar.google.com');
 
-- What's coming up on their calendar today (next 2-3 events with times)
-- Any unread emails worth knowing about (urgent, from important people, needing a reply)
-- If the current page relates to something in their inbox or calendar, call it out specifically
-- A quick tip, reminder, or piece of advice relevant to what they're doing or their day
+  // On Gmail/Calendar, always produce a useful briefing — page text is useless (JS-rendered)
+  if (isGmail || isCalendar) {
+    const today    = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+    const todayISO = localDateISO();
 
-Be like a smart assistant who actually knows their schedule. Conversational but concise — 3-5 sentences max. Don't just list events robotically, actually give context and advice. Only respond with "clear" if there is literally nothing in the inbox, no events, and the page has no interesting context.`;
+    const briefingSystem = `You are JARVIS, ${name}'s personal AI. Casual, like a friend texting. No asterisks, no bullet points. Talking TO ${name}. 1-2 sentences about who emailed and what they said. Use ONLY words from the email text — do not reword, do not mention the calendar, do not invent anything.`;
 
-  const userMsg = `Current page: ${pageInfo.title} (${pageInfo.url})
-Page content: ${pageInfo.text.slice(0, 600)}
+    const extractSystem = `Does any email below explicitly ask to meet at a specific time (e.g. "at 8pm", "3pm tomorrow")? If yes, respond with ONLY this JSON and nothing else:
+{"title":"<short title>","startDate":"${todayISO}","startTime":"HH:MM","durationMinutes":60,"attendeeEmail":"<sender email>"}
+If no explicit time exists, respond with exactly: null`;
 
-TODAY'S REMAINING CALENDAR:
+    const emailContext = `Today: ${today} (${todayISO})\nEmails TO ${name}:\n${emailsText}`;
+
+    const [text, meetingRaw] = await Promise.all([
+      callASI(briefingSystem, [{ role: 'user', content: `${emailContext}\n\nCalendar:\n${eventsText}` }]),
+      callASI(extractSystem,  [{ role: 'user', content: emailContext }]),
+    ]);
+
+    let meeting = null;
+    const trimmed = (meetingRaw || '').trim().replace(/^```json\s*/i, '').replace(/```\s*$/, '').trim();
+    if (trimmed && trimmed !== 'null') {
+      try { meeting = JSON.parse(trimmed); } catch {
+        const m = trimmed.match(/\{[\s\S]*\}/);
+        if (m) { try { meeting = JSON.parse(m[0]); } catch {} }
+      }
+    }
+
+    if (meeting) {
+      const mKey = `${meeting.startDate}:${meeting.startTime}`;
+      if (handledMeetingKeys.has(mKey)) meeting = null;
+    }
+
+    return { text, meeting };
+  }
+
+  const system = `You are JARVIS, ${name}'s personal AI. Casual, sharp, like a friend texting. No asterisks, no bullet points. You are talking TO ${name}.
+
+Quick heads-up on what's relevant from their inbox/calendar. 1-2 sentences. If nothing useful, reply with just: clear`;
+
+  const userMsg = `Page: ${pageInfo.title} (${pageInfo.url})
+${pageInfo.text.slice(0, 500)}
+
+${name}'s calendar today:
 ${eventsText}
 
-UNREAD EMAILS:
-${emailsText}
-
-Give the user their briefing.`;
+Emails sent to ${name}:
+${emailsText}`;
 
   return callASI(system, [{ role: 'user', content: userMsg }]);
 }
 
 async function chatWithJarvis(userText, history) {
-  const { emailsText, eventsText } = await fetchContext();
+  const [{ emailsText, eventsText }, { user_name }] = await Promise.all([
+    fetchContext({ upcoming: true }),
+    chrome.storage.local.get('user_name'),
+  ]);
+  const name     = user_name || 'you';
+  const todayISO = localDateISO();
+  const today    = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
 
-  const system = `You are JARVIS, a smart personal AI assistant embedded in the user's browser. You can help with absolutely anything — answering questions, writing, coding, brainstorming, math, advice, analysis, or just chatting. You also have access to the user's Gmail and Google Calendar, so you can answer questions about their schedule and inbox too. Be concise, direct, and genuinely helpful. Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}.
+  const system = `You are JARVIS, ${name}'s personal AI — casual, sharp, zero fluff. Friend texting, not a chatbot. No asterisks, no bullet points, no "Certainly!". Today is ${today} (${todayISO}).
 
-INBOX (unread, last 24h):
+Always respond with JSON:
+{"text": "<your reply>", "meeting": null}
+
+If ${name} asks to add a meeting to their calendar AND the context has a specific time, set "meeting":
+{"title": "<short title>", "startDate": "YYYY-MM-DD", "startTime": "HH:MM", "durationMinutes": 60, "attendeeEmail": "<email if known>"}
+
+RULES:
+- Calendar events below are VERBATIM from Google Calendar. Quote them exactly — never paraphrase or rename them.
+- Email content is what OTHER people sent TO ${name}. Never confuse senders with calendar events.
+- Only invent nothing. Answer only from the data provided.
+
+Emails TO ${name}:
 ${emailsText}
 
-TODAY'S CALENDAR:
+${name}'s upcoming calendar (next 14 days):
 ${eventsText}`;
 
-  return callASI(system, [...history, { role: 'user', content: userText }]);
+  const raw    = await callASI(system, [...history, { role: 'user', content: userText }]);
+  const parsed = parseMeetingJSON(raw);
+
+  let meeting = parsed.meeting || null;
+  if (meeting) {
+    const mKey = `${meeting.startDate}:${meeting.startTime}`;
+    if (handledMeetingKeys.has(mKey)) meeting = null;
+  }
+
+  return { text: parsed.text || raw, meeting };
 }
 
 // ── Notifications ──────────────────────────────────────────────────────────────
 
-const ICON = 'icons/icon48.png';
-const notifiedKeys = new Set();  // prevent duplicate alerts within a session
+const ICON         = 'icons/icon48.png';
+const notifiedKeys = new Set();
 
 function osNotify(title, message) {
-  chrome.notifications.create({
+  chrome.notifications.create(`jarvis-${Date.now()}`, {
     type:     'basic',
     iconUrl:  ICON,
     title:    `⚡ JARVIS — ${title}`,
@@ -258,18 +365,44 @@ async function pushToTab(text) {
   }
 }
 
-// ── Proactive alarm ────────────────────────────────────────────────────────────
+// ── New email triage via AI ────────────────────────────────────────────────────
 
-async function proactiveCheck() {
-  const { asi_key } = await chrome.storage.sync.get('asi_key');
-  if (!asi_key) return;
+async function checkNewEmails() {
+  let emails;
+  try { emails = await getUnreadEmails(15); } catch { return; }
 
-  let emails, events;
-  try {
-    [emails, events] = await Promise.all([getUnreadEmails(), getTodayEvents()]);
-  } catch { return; }
+  const { seenEmailIds = [] } = await chrome.storage.local.get('seenEmailIds');
+  const seenSet  = new Set(seenEmailIds);
+  const newEmails = emails.filter(e => !seenSet.has(e.id));
 
-  // Upcoming meetings (10–20 min window)
+  if (!newEmails.length) return;
+
+  // Persist seen IDs immediately so parallel checks don't double-notify
+  await chrome.storage.local.set({
+    seenEmailIds: [...seenSet, ...newEmails.map(e => e.id)].slice(-500),
+  });
+
+  // Ask AI whether each new email needs attention
+  for (const email of newEmails.slice(0, 5)) {
+    const verdict = await callASI(
+      'You are a fast email triage assistant. Reply with only YES or NO. Say YES for: anything from a real person (not automated/marketing), meeting requests, questions, plans, anything needing a reply. Say NO only for newsletters, receipts, automated notifications.',
+      [{ role: 'user', content: `From: ${email.from}\nSubject: ${email.subject}\nPreview: ${email.snippet}` }]
+    ).catch(() => 'YES');  // default to YES if AI fails — never miss an email
+
+    if (verdict.trim().toUpperCase().startsWith('YES')) {
+      const msg = `From ${email.from.split('<')[0].trim()}: "${email.subject}"`;
+      osNotify('New email', msg);
+      await pushToTab(msg);
+    }
+  }
+}
+
+// ── Upcoming meeting check ─────────────────────────────────────────────────────
+
+async function checkMeetings() {
+  let events;
+  try { events = await getTodayEvents(); } catch { return; }
+
   for (const e of events) {
     const m   = minutesUntil(e.start);
     const key = `meeting:${e.title}:${e.start}`;
@@ -280,39 +413,97 @@ async function proactiveCheck() {
       await pushToTab(msg);
     }
   }
-
-  // Urgent emails
-  for (const e of emails) {
-    const key = `email:${e.subject}:${e.from}`;
-    if (/urgent|asap|deadline|invoice|action required/i.test(e.subject + e.snippet) && !notifiedKeys.has(key)) {
-      notifiedKeys.add(key);
-      const msg = `From ${e.from}: "${e.subject}"`;
-      osNotify('Urgent email', msg);
-      await pushToTab(msg);
-      break;  // one urgent email alert at a time
-    }
-  }
 }
+
+// ── Proactive alarm (runs every minute) ───────────────────────────────────────
+
+async function proactiveCheck() {
+  const { asi_key } = await chrome.storage.sync.get('asi_key');
+  if (!asi_key) return;
+  await Promise.allSettled([checkNewEmails(), checkMeetings()]);
+}
+
+// ── Calendar event creation ────────────────────────────────────────────────────
+
+async function createCalendarEvent({ title, startDate, startTime, durationMinutes = 60, attendeeEmail }) {
+  const token = await getGoogleToken();
+  const tz    = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  let start   = new Date(`${startDate}T${startTime}:00`);
+
+  // Only bump if the event is more than 20 hours in the past (clearly stale date from old email)
+  if (start < new Date(Date.now() - 20 * 60 * 60 * 1000)) {
+    start.setDate(start.getDate() + 1);
+  }
+
+  const end = new Date(start.getTime() + durationMinutes * 60_000);
+
+  const event = {
+    summary: title,
+    start: { dateTime: start.toISOString(), timeZone: tz },
+    end:   { dateTime: end.toISOString(),   timeZone: tz },
+  };
+  if (attendeeEmail) event.attendees = [{ email: attendeeEmail }];
+
+  const res  = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+    method:  'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body:    JSON.stringify(event),
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message || 'Calendar error');
+  return data;
+}
+
+// ── Parse AI meeting JSON ──────────────────────────────────────────────────────
+
+function parseMeetingJSON(raw) {
+  let text = (raw || '').trim().replace(/^```json\s*/i, '').replace(/```\s*$/, '').trim();
+  try { return JSON.parse(text); } catch {}
+  const m = text.match(/\{[\s\S]*\}/);
+  if (m) { try { return JSON.parse(m[0]); } catch {} }
+  return { text: raw, meeting: null };
+}
+
+// ── Handled meeting tracking (session-scoped, prevents re-prompting) ───────────
+
+const handledMeetingKeys = new Set();
 
 // ── Message listener ───────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'ANALYZE_PAGE') {
     analyzePageContext(message.context)
-      .then(text => sendResponse({ text }))
-      .catch(err  => sendResponse({ error: err.message }));
+      .then(result => {
+        if (typeof result === 'string') return sendResponse({ text: result });
+        sendResponse({ text: result.text, meeting: result.meeting });
+      })
+      .catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
+  if (message.type === 'CREATE_EVENT') {
+    createCalendarEvent(message.event)
+      .then(() => sendResponse({ success: true }))
+      .catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
+  if (message.type === 'MEETING_HANDLED') {
+    handledMeetingKeys.add(message.key);
+    sendResponse({});
     return true;
   }
   if (message.type === 'CHAT') {
     chatWithJarvis(message.text, message.history || [])
-      .then(text => sendResponse({ text }))
-      .catch(err  => sendResponse({ error: err.message }));
+      .then(result => sendResponse({ text: result.text, meeting: result.meeting }))
+      .catch(err   => sendResponse({ error: err.message }));
     return true;
   }
   if (message.type === 'AUTH') {
-    getGoogleToken(true)
-      .then(()  => sendResponse({ success: true }))
-      .catch(err => sendResponse({ error: err.message }));
+    // Always clear stored tokens so we get fresh OAuth with current scopes
+    chrome.storage.local.remove(['g_access_token', 'g_refresh_token', 'g_expiry'], () => {
+      getGoogleToken(true)
+        .then(()  => sendResponse({ success: true }))
+        .catch(err => sendResponse({ error: err.message }));
+    });
     return true;
   }
   if (message.type === 'GET_STATUS') {
@@ -394,7 +585,10 @@ async function handleRestaurantSearch(searchQuery, latitude, longitude) {
 
 // ── Alarms ─────────────────────────────────────────────────────────────────────
 
-chrome.alarms.create('proactive', { periodInMinutes: 5 });
+// On startup, wipe seen list so any existing unread emails get a fresh triage pass
+chrome.storage.local.remove('seenEmailIds');
+
+chrome.alarms.create('proactive', { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === 'proactive') proactiveCheck();
 });

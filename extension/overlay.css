@@ -206,3 +206,35 @@
 }
 
 .jarvis-send:hover { background: #2b4a7a; }
+
+.jarvis-actions {
+  display: flex;
+  gap: 8px;
+  padding: 0 4px;
+  align-self: flex-start;
+  width: 100%;
+}
+
+.jarvis-btn {
+  flex: 1;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+  font-family: inherit;
+}
+
+.jarvis-btn.accept {
+  background: #1a4731;
+  color: #9ae6b4;
+}
+.jarvis-btn.accept:hover { background: #276749; }
+
+.jarvis-btn.decline {
+  background: #2d1f09;
+  color: #fbd38d;
+}
+.jarvis-btn.decline:hover { background: #7b341e; }
