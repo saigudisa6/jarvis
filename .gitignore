@@ -1,0 +1,35 @@
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+*.egg
+venv/
+.venv/
+env/
+
+# ── PyInstaller build artifacts ──
+build/
+dist/
+*.spec
+
+# ── User-generated config (unique per machine) ──
+config.json
+profile.json
+behavioral_log.json
+macros.json
+token.json
+
+# ── Google OAuth credentials (NEVER commit these) ──
+credentials.json
+
+# ── OS files ──
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE ──
+.vscode/
+.idea/
+*.swp
+*.swo

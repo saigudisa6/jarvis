@@ -1,0 +1,7 @@
+{
+  "agent_seed": "4bae21d526eb95701a5045c01914419e",
+  "integrations": [
+    "gmail"
+  ],
+  "google_oauth_complete": false
+}
