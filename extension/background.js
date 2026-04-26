@@ -158,6 +158,22 @@ async function getTodayEvents() {
   }));
 }
 
+async function getUpcomingEvents(days = 14) {
+  const token = await getGoogleToken();
+  const now   = new Date();
+  const end   = new Date(now);
+  end.setDate(end.getDate() + days);
+  const data  = await gFetch(
+    `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${now.toISOString()}&timeMax=${end.toISOString()}&singleEvents=true&orderBy=startTime&maxResults=30`,
+    token
+  );
+  return (data.items || []).map(e => ({
+    title:     e.summary || 'Untitled',
+    start:     e.start?.dateTime || e.start?.date || '',
+    attendees: (e.attendees || []).filter(a => !a.self).map(a => a.email),
+  }));
+}
+
 function minutesUntil(iso) { return (new Date(iso) - Date.now()) / 60_000; }
 
 async function gFetch(url, token) {
@@ -189,10 +205,13 @@ async function callASI(system, messages) {
 
 // ── Context builders ───────────────────────────────────────────────────────────
 
-async function fetchContext() {
-  const [emailRes, eventRes] = await Promise.allSettled([getRecentEmails(), getTodayEvents()]);
-  const emails = emailRes.status  === 'fulfilled' ? emailRes.value  : [];
-  const events = eventRes.status  === 'fulfilled' ? eventRes.value  : [];
+async function fetchContext({ upcoming = false } = {}) {
+  const [emailRes, eventRes] = await Promise.allSettled([
+    getRecentEmails(),
+    upcoming ? getUpcomingEvents() : getTodayEvents(),
+  ]);
+  const emails = emailRes.status === 'fulfilled' ? emailRes.value : [];
+  const events = eventRes.status === 'fulfilled' ? eventRes.value : [];
 
   const emailsText = emails.length
     ? emails.map(e => `From: ${e.from}\nSubject: ${e.subject}\nPreview: ${e.snippet}`).join('\n---\n')
@@ -200,17 +219,24 @@ async function fetchContext() {
 
   const eventsText = events.length
     ? events.map(e => {
-        const t    = new Date(e.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        const soon = minutesUntil(e.start) > 0 && minutesUntil(e.start) < 60
+        const d    = new Date(e.start);
+        const date = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+        const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const soon = !upcoming && minutesUntil(e.start) > 0 && minutesUntil(e.start) < 60
           ? ` (in ${Math.round(minutesUntil(e.start))} min)` : '';
-        return `${t}: ${e.title}${soon}`;
+        return upcoming ? `${date} ${time}: ${e.title}` : `${time}: ${e.title}${soon}`;
       }).join('\n')
-    : 'Nothing on the calendar today.';
+    : upcoming ? 'No events in the next 14 days.' : 'Nothing on the calendar today.';
 
   return { emailsText, eventsText };
 }
 
 // ── Core intelligence ──────────────────────────────────────────────────────────
+
+function localDateISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
 
 async function analyzePageContext(pageInfo) {
   const { emailsText, eventsText } = await fetchContext();
@@ -223,40 +249,36 @@ async function analyzePageContext(pageInfo) {
   // On Gmail/Calendar, always produce a useful briefing — page text is useless (JS-rendered)
   if (isGmail || isCalendar) {
     const today    = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
-    const todayISO = new Date().toISOString().slice(0, 10);
+    const todayISO = localDateISO();
 
-    const system = `You are JARVIS, ${name}'s personal AI. Casual, like a friend texting. No asterisks, no bullet points. Talking TO ${name}.
+    const briefingSystem = `You are JARVIS, ${name}'s personal AI. Casual, like a friend texting. No asterisks, no bullet points. Talking TO ${name}. 1-2 sentences about who emailed and what they said. Use ONLY words from the email text — do not reword, do not mention the calendar, do not invent anything.`;
 
-Respond ONLY with valid JSON — no text outside the JSON:
-{"text": "<message>", "meeting": null}
+    const extractSystem = `Does any email below explicitly ask to meet at a specific time (e.g. "at 8pm", "3pm tomorrow")? If yes, respond with ONLY this JSON and nothing else:
+{"title":"<short title>","startDate":"${todayISO}","startTime":"HH:MM","durationMinutes":60,"attendeeEmail":"<sender email>"}
+If no explicit time exists, respond with exactly: null`;
 
-STRICT RULES:
-1. "text": 1-2 sentences. Quote who emailed and roughly what they said. Never invent words not in the email.
-2. Calendar events listed below are REAL events already on ${name}'s calendar. Do NOT make up or modify event names.
-3. Set "meeting" only if an email explicitly contains a time like "at 8pm" or "3pm". Extract the time verbatim.
-4. Do NOT decide if ${name} is busy — always surface the meeting request and let them decide.
-5. "startDate": ${todayISO} unless email says otherwise. "startTime": 24h HH:MM from the email. "durationMinutes": 60. "attendeeEmail": sender's email.
-6. Never invent meeting details not present in the email text.`;
+    const emailContext = `Today: ${today} (${todayISO})\nEmails TO ${name}:\n${emailsText}`;
 
-    const userMsg = `Today: ${today} (${todayISO})
+    const [text, meetingRaw] = await Promise.all([
+      callASI(briefingSystem, [{ role: 'user', content: `${emailContext}\n\nCalendar:\n${eventsText}` }]),
+      callASI(extractSystem,  [{ role: 'user', content: emailContext }]),
+    ]);
 
-EMAILS RECEIVED BY ${name.toUpperCase()} (From = sender):
-${emailsText}
+    let meeting = null;
+    const trimmed = (meetingRaw || '').trim().replace(/^```json\s*/i, '').replace(/```\s*$/, '').trim();
+    if (trimmed && trimmed !== 'null') {
+      try { meeting = JSON.parse(trimmed); } catch {
+        const m = trimmed.match(/\{[\s\S]*\}/);
+        if (m) { try { meeting = JSON.parse(m[0]); } catch {} }
+      }
+    }
 
-${name.toUpperCase()}'S REAL CALENDAR EVENTS TODAY:
-${eventsText}`;
-
-    const raw    = await callASI(system, [{ role: 'user', content: userMsg }]);
-    const parsed = parseMeetingJSON(raw);
-
-    // Don't re-prompt if user already handled this meeting this session
-    let meeting = parsed.meeting || null;
     if (meeting) {
       const mKey = `${meeting.startDate}:${meeting.startTime}`;
       if (handledMeetingKeys.has(mKey)) meeting = null;
     }
 
-    return { text: parsed.text || raw, meeting };
+    return { text, meeting };
   }
 
   const system = `You are JARVIS, ${name}'s personal AI. Casual, sharp, like a friend texting. No asterisks, no bullet points. You are talking TO ${name}.
@@ -277,11 +299,11 @@ ${emailsText}`;
 
 async function chatWithJarvis(userText, history) {
   const [{ emailsText, eventsText }, { user_name }] = await Promise.all([
-    fetchContext(),
+    fetchContext({ upcoming: true }),
     chrome.storage.local.get('user_name'),
   ]);
-  const name    = user_name || 'you';
-  const todayISO = new Date().toISOString().slice(0, 10);
+  const name     = user_name || 'you';
+  const todayISO = localDateISO();
   const today    = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
 
   const system = `You are JARVIS, ${name}'s personal AI — casual, sharp, zero fluff. Friend texting, not a chatbot. No asterisks, no bullet points, no "Certainly!". Today is ${today} (${todayISO}).
@@ -289,15 +311,18 @@ async function chatWithJarvis(userText, history) {
 Always respond with JSON:
 {"text": "<your reply>", "meeting": null}
 
-If ${name} asks to add a meeting to their calendar, AND the emails or conversation contain a specific time, set "meeting":
+If ${name} asks to add a meeting to their calendar AND the context has a specific time, set "meeting":
 {"title": "<short title>", "startDate": "YYYY-MM-DD", "startTime": "HH:MM", "durationMinutes": 60, "attendeeEmail": "<email if known>"}
 
-STRICT: Do NOT invent event names or times. Only use what's explicitly in the emails or conversation. Calendar events below are REAL — do not modify their names.
+RULES:
+- Calendar events below are VERBATIM from Google Calendar. Quote them exactly — never paraphrase or rename them.
+- Email content is what OTHER people sent TO ${name}. Never confuse senders with calendar events.
+- Only invent nothing. Answer only from the data provided.
 
 Emails TO ${name}:
 ${emailsText}
 
-${name}'s calendar today:
+${name}'s upcoming calendar (next 14 days):
 ${eventsText}`;
 
   const raw    = await callASI(system, [...history, { role: 'user', content: userText }]);

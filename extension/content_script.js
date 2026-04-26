@@ -183,10 +183,8 @@
   input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) send(input.value); });
 
   // ── Page analysis ──────────────────────────────────────────────────────────────
-  async function analyze(force = false) {
-    // Debounce — ignore if we analyzed within the last 10 seconds (catches SPA double-fires)
-    // On Gmail/Calendar, always run (force=true) — page text is empty anyway, briefing is always useful
-    if (!force && Date.now() - lastAnalyzed < 10_000) return;
+  async function analyze() {
+    if (Date.now() - lastAnalyzed < 20_000) return;  // one analysis per 20s max
     lastAnalyzed = Date.now();
 
     status.textContent = 'analyzing…';
@@ -211,8 +209,6 @@
   const statusRes = await chrome.runtime.sendMessage({ type: 'GET_STATUS' }).catch(() => ({}));
   ready = !!statusRes?.ready;
 
-  const isGmailOrCal = location.hostname === 'mail.google.com' || location.hostname === 'calendar.google.com';
-
   if (!ready) {
     addMsg('Add your ASI:One API key in the JARVIS popup to get started.', 'alert');
     openPanel();
@@ -220,21 +216,21 @@
     addMsg('Connect Google in the JARVIS popup to unlock email & calendar context.', 'alert');
     openPanel();
   } else {
-    // Delay lets SPAs (Gmail) finish settling their URL before we snapshot lastUrl
     setTimeout(() => {
-      lastUrl = location.href;   // absorb any hash changes during page init
-      analyze(isGmailOrCal);
+      lastUrl      = location.href;  // absorb URL settling during page init
+      lastAnalyzed = 0;              // ensure first run always fires
+      analyze();
     }, 1500);
   }
 
-  // SPA navigation detection — only fires on meaningful URL changes after initial load
+  // SPA navigation detection
   setInterval(() => {
     if (location.href !== lastUrl) {
-      lastUrl  = location.href;
-      history  = [];
+      lastUrl        = location.href;
+      history        = [];
       msgs.innerHTML = '';
-      const nowGmailOrCal = location.hostname === 'mail.google.com' || location.hostname === 'calendar.google.com';
-      if (ready) setTimeout(() => analyze(nowGmailOrCal), 1000);
+      lastAnalyzed   = 0;  // reset cooldown for new page
+      if (ready) setTimeout(analyze, 1000);
     }
   }, 2000);
 
