@@ -3,27 +3,87 @@ import json
 import os
 from email.mime.text import MIMEText
 from uagents import Agent, Context
+from dotenv import load_dotenv
+
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
+
 from gmail_auth import get_gmail_service
-from restaurant_agent import RestaurantSearchRequest, UserPreferences
-from user_preferences import get_preferences_manager
+# Obsolete local imports removed
 from datetime import datetime
 
 from anthropic import Anthropic
-from uagents import Agent, Context
+from uagents import Agent, Context, Model
+import uuid
 
 from calendar_auth import get_todays_events
-from gmail_auth import get_gmail_service
+from gmail_auth import get_gmail_service, get_email_body, get_recent_emails
 from notifications import notify
-from proactive import check_meeting_reminders, check_back_to_back, check_follow_ups, check_eod_summary
+from proactive import proactive_calendar_checks_cloud, proactive_daily_checks_cloud
 
 AGENTVERSE_API_KEY = os.getenv("AGENTVERSE_API_KEY", "")
-
-KEYWORDS = ["schedule", "meeting", "urgent", "invoice", "deadline"]
+CLOUD_ORCHESTRATOR_ADDRESS = os.getenv("CLOUD_ORCHESTRATOR_ADDRESS", "")
+AGENT_SEED = os.getenv("AGENT_SEED", "jarvis_orch_final_sync")
 
 SEEN_IDS_FILE = "seen_ids.json"
 BRIEFING_STATE_FILE = "briefing_state.json"
 
-anthropic_client = Anthropic()
+# ── Cloud Models ─────────────────────────────────────────────────────────────
+
+# --- Models ---
+class MorningBriefingReq(Model):
+    user_uuid: str
+    request_id: str
+    events_text: str
+    emails_text: str
+
+class MorningBriefingRes(Model):
+    request_id: str
+    briefing: str
+
+class EmailAnalysisReq(Model):
+    user_uuid: str
+    request_id: str
+    emails: list
+
+class EmailAnalysisRes(Model):
+    request_id: str
+    alerts: list
+
+class PreMeetingBriefReq(Model):
+    user_uuid: str
+    request_id: str
+    event_title: str
+    event_start: str
+    attendees_text: str
+    description: str
+    emails_text: str
+
+class PreMeetingBriefRes(Model):
+    request_id: str
+    brief: str
+
+class EODSummaryReq(Model):
+    user_uuid: str
+    request_id: str
+    unread_count: int
+    tomorrow_text: str
+
+class EODSummaryRes(Model):
+    request_id: str
+    summary: str
+
+from typing import List, Dict
+
+class EmailAnalysisReq(Model):
+    user_uuid: str
+    request_id: str
+    emails: List[Dict[str, str]]
+
+class EmailAnalysisRes(Model):
+    request_id: str
+    alerts: List[Dict[str, str]]
+    
+
 
 
 # ── Persistence helpers ────────────────────────────────────────────────────────
@@ -53,161 +113,25 @@ def mark_briefing_sent():
         json.dump({'last_sent': datetime.now().strftime('%Y-%m-%d')}, f)
 
 
-# ── Gmail helpers ──────────────────────────────────────────────────────────────
+# ── Gmail helpers imported from gmail_auth.py ──
 
-def get_email_body(msg):
-    payload = msg['payload']
-    if 'parts' in payload:
-        for part in payload['parts']:
-            if part['mimeType'] == 'text/plain':
-                data = part['body'].get('data', '')
-                return base64.urlsafe_b64decode(data).decode('utf-8', errors='replace')
-    data = payload.get('body', {}).get('data', '')
-    return base64.urlsafe_b64decode(data).decode('utf-8', errors='replace') if data else ''
-
-
-def check_keywords(text, keywords):
-    lower = text.lower()
-    return [kw for kw in keywords if kw in lower]
-
-
-def get_recent_emails(query='is:unread newer_than:1d', max_results=15):
-    service = get_gmail_service()
-    result = service.users().messages().list(
-        userId='me', q=query, maxResults=max_results
-    ).execute()
-
-    emails = []
-    for message in result.get('messages', []):
-        msg = service.users().messages().get(
-            userId='me', id=message['id'], format='full'
-        ).execute()
-        headers = msg['payload']['headers']
-        subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
-        sender  = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown')
-        body    = get_email_body(msg)
-        emails.append({'subject': subject, 'sender': sender, 'preview': body[:400]})
-    return emails
-
-
-# ── Morning briefing ───────────────────────────────────────────────────────────
-
-def generate_morning_briefing():
-    events = get_todays_events()
-    emails = get_recent_emails()
-
-    if events:
-        events_text = "\n".join(
-            f"  {e['start']}: {e['title']}"
-            + (f" (with {', '.join(e['attendees'])})" if e['attendees'] else "")
-            for e in events
-        )
-    else:
-        events_text = "  No events scheduled today."
-
-    if emails:
-        emails_text = "\n\n".join(
-            f"  From: {e['sender']}\n  Subject: {e['subject']}\n  Preview: {e['preview']}"
-            for e in emails
-        )
-    else:
-        emails_text = "  No unread emails in the last 24 hours."
-
-    response = anthropic_client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=600,
-        messages=[{
-            "role": "user",
-            "content": f"""You are JARVIS, a personal AI assistant. Generate a concise morning briefing.
-
-TODAY'S CALENDAR:
-{events_text}
-
-RECENT UNREAD EMAILS:
-{emails_text}
-
-Produce a morning briefing with three short sections:
-1. Meetings & Events — list today's events with times
-2. Inbox Highlights — flag emails that need a reply or action
-3. Top Priorities — 2-3 concrete action items for the day
-
-Be direct and specific. Keep the whole briefing under 220 words."""
-        }]
-    )
-    return response.content[0].text
 
 
 # ── Agent ──────────────────────────────────────────────────────────────────────
 
-def build_user_preferences(user_id: str) -> UserPreferences:
-    """
-    Build user preferences from personality quiz data stored in user_preferences module.
-    """
-    manager = get_preferences_manager()
-    profile = manager.load_profile(user_id)
-    
-    if profile:
-        return UserPreferences(
-            favorite_cuisines=profile.favorite_cuisines,
-            dietary_restrictions=profile.dietary_restrictions,
-            price_range=profile.price_range,
-            ambiance_preferences=profile.ambiance_preferences,
-            favorite_restaurants=profile.favorite_restaurants,
-            cuisine_aversions=profile.cuisine_aversions,
-            user_id=user_id
-        )
-    else:
-        # Return default preferences if profile doesn't exist
-        return UserPreferences(
-            favorite_cuisines=["Italian", "Japanese", "Mexican"],
-            dietary_restrictions=[],
-            price_range="moderate",
-            ambiance_preferences=["casual"],
-            favorite_restaurants=[],
-            cuisine_aversions=[],
-            user_id=user_id
-        )
-
-async def search_restaurants(
-    ctx: Context,
-    search_query: str,
-    latitude: float,
-    longitude: float,
-    user_id: str,
-    occasion: str = "casual"
-):
-    """
-    Send restaurant search request to restaurant agent
-    """
-    user_prefs = build_user_preferences(user_id)
-    
-    request = RestaurantSearchRequest(
-        search_query=search_query,
-        latitude=latitude,
-        longitude=longitude,
-        user_preferences=user_prefs,
-        occasion=occasion,
-        max_results=5
-    )
-    
-    ctx.logger.info(f"Requesting restaurant suggestions from agent: {RESTAURANT_AGENT_ADDRESS}")
-    await ctx.send(RESTAURANT_AGENT_ADDRESS, request)
-
-# Configuration
-RESTAURANT_AGENT_ADDRESS = os.getenv("RESTAURANT_AGENT_ADDRESS", "agent1qf84yat2xvrn5mjmtz0z0l3dn0z6mtzx4g0x0nj94y6mn96cdn4y3c8yft")  # Update with actual agent address
+# Restaurant search logic migrated to cloud-native extension bridge
 
 # Create the agent
+# No port/endpoint — mailbox-only so Agentverse doesn't try to reach
+# localhost:8000 from the cloud (which always fails).
 agent = Agent(
     name="jarvis",
-    seed="win_lahacks_2026",
-    port=8000,
-    endpoint=["http://localhost:8000/submit"],
-    agentverse=f"{AGENTVERSE_API_KEY}@https://agentverse.ai" if AGENTVERSE_API_KEY else None,
-    mailbox=bool(AGENTVERSE_API_KEY),
+    seed=AGENT_SEED,
+    mailbox=True,
 )
 
-from chat_protocol import chat_proto
-agent.include(chat_proto, publish_manifest=True)
+# Chat protocol removed to restore stable communication
+# agent.include(chat_proto, publish_manifest=True)
 
 
 @agent.on_event("startup")
@@ -215,10 +139,26 @@ async def startup(ctx: Context):
     ctx.logger.info(f"JARVIS started. Address: {agent.address}")
     ctx.logger.info(f"Agentverse mailbox: {'enabled' if AGENTVERSE_API_KEY else 'disabled — set AGENTVERSE_API_KEY'}")
     ctx.logger.info("Monitoring Gmail and Calendar...")
+    
+    # Send a quick test to the cloud to verify everything works!
+    if CLOUD_ORCHESTRATOR_ADDRESS:
+        ctx.logger.info(f"--- Sending test to Cloud Agent: {CLOUD_ORCHESTRATOR_ADDRESS} ---")
+        req = MorningBriefingReq(
+            user_uuid=agent.address,
+            request_id="startup-test-123",
+            events_text="  2:00 PM: Project sync with design team",
+            emails_text="  From: boss@company.com\n  Subject: Urgent Update needed\n  Preview: Hey, please review the latest designs."
+        )
+        await ctx.send(CLOUD_ORCHESTRATOR_ADDRESS, req)
+    else:
+        ctx.logger.warning("CLOUD_ORCHESTRATOR_ADDRESS not set — skipping test send")
 
 
 @agent.on_interval(period=60.0)
 async def check_emails(ctx: Context):
+    if not CLOUD_ORCHESTRATOR_ADDRESS:
+        return
+        
     ctx.logger.info("Checking emails...")
     try:
         service  = get_gmail_service()
@@ -229,6 +169,8 @@ async def check_emails(ctx: Context):
         ).execute()
         messages = result.get('messages', [])
         new_seen = set()
+
+        emails_to_analyze = []
 
         for message in messages:
             msg_id = message['id']
@@ -241,47 +183,102 @@ async def check_emails(ctx: Context):
             subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
             sender  = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown')
             body    = get_email_body(msg)
-            matched = check_keywords(subject + " " + body, KEYWORDS)
-
-            if matched:
-                ctx.logger.info(f"[EMAIL] keyword={matched} | from={sender} | subject={subject}")
-                notify(f"Urgent email: {subject}", f"From: {sender} | Keywords: {', '.join(matched)}")
+            
+            emails_to_analyze.append({
+                "subject": subject,
+                "sender": sender,
+                "preview": body[:200]
+            })
 
         save_seen_ids(seen_ids | new_seen)
+        
+        if emails_to_analyze:
+            req = EmailAnalysisReq(
+                user_uuid=agent.address,
+                request_id=str(uuid.uuid4()), 
+                emails=emails_to_analyze
+            )
+            await ctx.send(CLOUD_ORCHESTRATOR_ADDRESS, req)
+            
     except Exception as e:
         ctx.logger.error(f"Email check failed: {e}")
+
+@agent.on_message(model=EmailAnalysisRes)
+async def handle_email_alerts(ctx: Context, sender: str, msg: EmailAnalysisRes):
+    for alert in msg.alerts:
+        ctx.logger.info(f"[EMAIL ALERT] {alert['subject']}")
+        notify(alert['subject'], alert['body'])
+
 
 
 @agent.on_interval(period=300.0)  # poll every 5 min so we catch the 8am window
 async def morning_briefing_check(ctx: Context):
     now = datetime.now()
-    if now.hour == 8 and not briefing_sent_today():
-        ctx.logger.info("Generating morning briefing...")
+    if now.hour == 8 and not briefing_sent_today() and CLOUD_ORCHESTRATOR_ADDRESS:
+        ctx.logger.info("Requesting morning briefing from cloud...")
         try:
-            briefing = generate_morning_briefing()
-            mark_briefing_sent()
-            notify("JARVIS Morning Briefing", briefing)
-            ctx.logger.info("\n=== JARVIS MORNING BRIEFING ===\n" + briefing + "\n===============================")
+            events = get_todays_events()
+            emails = get_recent_emails()
+            
+            events_text = "\n".join(
+                f"  {e['start']}: {e['title']}"
+                + (f" (with {', '.join(e['attendees'])})" if e['attendees'] else "")
+                for e in events
+            ) if events else "  No events scheduled today."
+
+            emails_text = "\n\n".join(
+                f"  From: {e['sender']}\n  Subject: {e['subject']}\n  Preview: {e['preview']}"
+                for e in emails
+            ) if emails else "  No unread emails in the last 24 hours."
+
+            req = MorningBriefingReq(
+                user_uuid=agent.address,
+                request_id=str(uuid.uuid4()),
+                events_text=events_text,
+                emails_text=emails_text
+            )
+            await ctx.send(CLOUD_ORCHESTRATOR_ADDRESS, req)
         except Exception as e:
-            ctx.logger.error(f"Morning briefing failed: {e}")
+            ctx.logger.error(f"Failed to request morning briefing: {e}")
+
+@agent.on_message(model=MorningBriefingRes)
+async def handle_morning_briefing(ctx: Context, sender: str, msg: MorningBriefingRes):
+    mark_briefing_sent()
+    notify("JARVIS Morning Briefing", msg.briefing)
+    ctx.logger.info("\n=== JARVIS MORNING BRIEFING ===\n" + msg.briefing + "\n===============================")
+
 
 
 @agent.on_interval(period=60.0)
 async def proactive_calendar_checks(ctx: Context):
+    if not CLOUD_ORCHESTRATOR_ADDRESS:
+        return
     try:
-        check_meeting_reminders()
-        check_back_to_back()
+        await proactive_calendar_checks_cloud(ctx, CLOUD_ORCHESTRATOR_ADDRESS)
     except Exception as e:
         ctx.logger.error(f"Proactive calendar check failed: {e}")
 
-
 @agent.on_interval(period=300.0)
 async def proactive_daily_checks(ctx: Context):
+    if not CLOUD_ORCHESTRATOR_ADDRESS:
+        return
     try:
-        check_eod_summary()
-        check_follow_ups()
+        await proactive_daily_checks_cloud(ctx, CLOUD_ORCHESTRATOR_ADDRESS)
     except Exception as e:
         ctx.logger.error(f"Proactive daily check failed: {e}")
+
+@agent.on_message(model=PreMeetingBriefRes)
+async def handle_pre_meeting_brief(ctx: Context, sender: str, msg: PreMeetingBriefRes):
+    notify("Meeting starting soon", msg.brief)
+    ctx.logger.info(f"\n[JARVIS] Pre-meeting brief:\n{msg.brief}\n")
+
+@agent.on_message(model=EODSummaryRes)
+async def handle_eod_summary(ctx: Context, sender: str, msg: EODSummaryRes):
+    notify("JARVIS — End of Day", msg.summary)
+    ctx.logger.info(f"\n[JARVIS] EOD Summary:\n{msg.summary}\n")
+
+
+
 
 
 if __name__ == "__main__":

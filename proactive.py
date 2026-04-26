@@ -1,16 +1,26 @@
 import base64
+import uuid
 from datetime import datetime, timedelta
 
-from anthropic import Anthropic
+from uagents import Model
+
+class PreMeetingBriefReq(Model):
+    request_id: str
+    event_title: str
+    event_start: str
+    attendees_text: str
+    description: str
+    emails_text: str
+
+class EODSummaryReq(Model):
+    request_id: str
+    unread_count: int
+    tomorrow_text: str
 
 from calendar_auth import get_todays_events, get_events_for_day
 from gmail_auth import get_gmail_service
 from notifications import notify, load_state, save_state
 
-anthropic_client = Anthropic()
-
-
-# ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _parse_dt(iso_str):
     return datetime.fromisoformat(iso_str.replace('Z', '+00:00'))
@@ -47,9 +57,13 @@ def _emails_from_senders(sender_emails, max_per_sender=3):
     return subjects
 
 
-# ── Feature 1: Pre-meeting brief (15 min before) ──────────────────────────────
+# ── Feature 1: Pre-meeting brief (15 min before) (CLOUD VERSION) ──────────────
 
-def check_meeting_reminders():
+async def proactive_calendar_checks_cloud(ctx, cloud_address: str):
+    await _check_meeting_reminders_cloud(ctx, cloud_address)
+    _check_back_to_back()  # This one doesn't use LLM, so we keep it local
+
+async def _check_meeting_reminders_cloud(ctx, cloud_address: str):
     state     = load_state()
     reminded  = set(state.get('reminded_events', []))
     now       = datetime.now().astimezone()
@@ -71,25 +85,17 @@ def check_meeting_reminders():
         attendees_text  = ', '.join(attendees) if attendees else 'No external attendees'
         emails_text     = '\n'.join(recent_subjects) if recent_subjects else 'No recent emails from attendees.'
 
-        response = anthropic_client.messages.create(
-            model='claude-sonnet-4-6',
-            max_tokens=250,
-            messages=[{
-                'role': 'user',
-                'content': (
-                    f"Pre-meeting brief for JARVIS. Be extremely concise — 3 bullets max.\n\n"
-                    f"Meeting: {event['title']}\n"
-                    f"Time: {event['start']}\n"
-                    f"Attendees: {attendees_text}\n"
-                    f"Description: {event.get('description') or 'None'}\n\n"
-                    f"Recent emails from attendees:\n{emails_text}\n\n"
-                    f"Output: what it's likely about, any open threads, one thing to prepare."
-                )
-            }]
+        ctx.logger.info(f"Requesting pre-meeting brief for: {event['title']}")
+        req = PreMeetingBriefReq(
+            request_id=str(uuid.uuid4()),
+            event_title=event['title'],
+            event_start=event['start'],
+            attendees_text=attendees_text,
+            description=event.get('description') or 'None',
+            emails_text=emails_text
         )
-        brief = response.content[0].text
-        notify(f"Meeting in 15 min: {event['title']}", brief)
-        print(f"\n[JARVIS] Pre-meeting brief — {event['title']}:\n{brief}\n")
+        await ctx.send(cloud_address, req)
+        
         reminded.add(event_key)
 
     state['reminded_events'] = list(reminded)
@@ -98,7 +104,7 @@ def check_meeting_reminders():
 
 # ── Feature 2: Back-to-back meeting warning (30 min before pair) ──────────────
 
-def check_back_to_back():
+def _check_back_to_back():
     state   = load_state()
     warned  = set(state.get('btob_warned', []))
     now     = datetime.now().astimezone()
@@ -132,7 +138,11 @@ def check_back_to_back():
 
 # ── Feature 3: Follow-up nudge (unanswered sent emails after 3 days) ──────────
 
-def check_follow_ups():
+async def proactive_daily_checks_cloud(ctx, cloud_address: str):
+    await _check_eod_summary_cloud(ctx, cloud_address)
+    _check_follow_ups()
+
+def _check_follow_ups():
     state = load_state()
     now   = datetime.now()
 
@@ -178,9 +188,9 @@ def check_follow_ups():
     save_state(state)
 
 
-# ── Feature 4: End-of-day summary (5 PM) ─────────────────────────────────────
+# ── Feature 4: End-of-day summary (5 PM) (CLOUD VERSION) ─────────────────────────────────────
 
-def check_eod_summary():
+async def _check_eod_summary_cloud(ctx, cloud_address: str):
     state = load_state()
     now   = datetime.now()
     today = now.strftime('%Y-%m-%d')
@@ -200,23 +210,13 @@ def check_eod_summary():
     else:
         tomorrow_text = '  Nothing scheduled.'
 
-    response = anthropic_client.messages.create(
-        model='claude-sonnet-4-6',
-        max_tokens=200,
-        messages=[{
-            'role': 'user',
-            'content': (
-                f"End-of-day summary for JARVIS. 2-3 sentences max.\n\n"
-                f"Unread emails right now: {unread_count}\n"
-                f"Tomorrow's calendar:\n{tomorrow_text}\n\n"
-                f"Tell the user what to handle before logging off and what tomorrow looks like."
-            )
-        }]
+    ctx.logger.info("Requesting EOD summary from cloud...")
+    req = EODSummaryReq(
+        request_id=str(uuid.uuid4()),
+        unread_count=unread_count,
+        tomorrow_text=tomorrow_text
     )
-
-    summary = response.content[0].text
-    notify("JARVIS — End of Day", summary)
-    print(f"\n[JARVIS] EOD Summary:\n{summary}\n")
+    await ctx.send(cloud_address, req)
 
     state['eod_sent'] = today
     save_state(state)

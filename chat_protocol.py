@@ -14,14 +14,48 @@ from anthropic import Anthropic
 from uagents import Context, Model, Protocol
 
 from calendar_auth import get_todays_events, get_events_for_day, create_calendar_event
-from gmail_auth import get_gmail_service
-from orchestrator import (
-    get_email_body,
-    get_recent_emails,
-    generate_morning_briefing,
-)
+from gmail_auth import get_gmail_service, get_recent_emails, get_email_body
 
 anthropic_client = Anthropic()
+
+def generate_morning_briefing():
+    events = get_todays_events()
+    emails = get_recent_emails()
+
+    events_text = "\n".join(
+        f"  {e['start']}: {e['title']}"
+        + (f" (with {', '.join(e['attendees'])})" if e['attendees'] else "")
+        for e in events
+    ) if events else "  No events scheduled today."
+
+    emails_text = "\n\n".join(
+        f"  From: {e['sender']}\n  Subject: {e['subject']}\n  Preview: {e['preview']}"
+        for e in emails
+    ) if emails else "  No unread emails in the last 24 hours."
+
+    response = anthropic_client.messages.create(
+        model="claude-3-5-sonnet-20240620",
+        max_tokens=600,
+        messages=[{
+            "role": "user",
+            "content": f"""You are JARVIS, a personal AI assistant. Generate a concise morning briefing.
+
+TODAY'S CALENDAR:
+{events_text}
+
+RECENT UNREAD EMAILS:
+{emails_text}
+
+Produce a morning briefing with three short sections:
+1. Meetings & Events — list today's events with times
+2. Inbox Highlights — flag emails that need a reply or action
+3. Top Priorities — 2-3 concrete action items for the day
+
+Be direct and specific. Keep the whole briefing under 220 words."""
+        }]
+    )
+    return response.content[0].text
+
 
 # ── Protocol models (must match Agentverse Chat Protocol schema) ───────────────
 
