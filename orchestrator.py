@@ -4,6 +4,8 @@ import os
 from email.mime.text import MIMEText
 from uagents import Agent, Context
 from gmail_auth import get_gmail_service
+from restaurant_agent import RestaurantSearchRequest, UserPreferences
+from user_preferences import get_preferences_manager
 
 # Keywords to watch for
 KEYWORDS = ["schedule", "meeting", "urgent", "invoice", "deadline"]
@@ -35,6 +37,63 @@ def get_email_body(msg):
 def check_keywords(text, keywords):
     text_lower = text.lower()
     return [kw for kw in keywords if kw in text_lower]
+
+def build_user_preferences(user_id: str) -> UserPreferences:
+    """
+    Build user preferences from personality quiz data stored in user_preferences module.
+    """
+    manager = get_preferences_manager()
+    profile = manager.load_profile(user_id)
+    
+    if profile:
+        return UserPreferences(
+            favorite_cuisines=profile.favorite_cuisines,
+            dietary_restrictions=profile.dietary_restrictions,
+            price_range=profile.price_range,
+            ambiance_preferences=profile.ambiance_preferences,
+            favorite_restaurants=profile.favorite_restaurants,
+            cuisine_aversions=profile.cuisine_aversions,
+            user_id=user_id
+        )
+    else:
+        # Return default preferences if profile doesn't exist
+        return UserPreferences(
+            favorite_cuisines=["Italian", "Japanese", "Mexican"],
+            dietary_restrictions=[],
+            price_range="moderate",
+            ambiance_preferences=["casual"],
+            favorite_restaurants=[],
+            cuisine_aversions=[],
+            user_id=user_id
+        )
+
+async def search_restaurants(
+    ctx: Context,
+    search_query: str,
+    latitude: float,
+    longitude: float,
+    user_id: str,
+    occasion: str = "casual"
+):
+    """
+    Send restaurant search request to restaurant agent
+    """
+    user_prefs = build_user_preferences(user_id)
+    
+    request = RestaurantSearchRequest(
+        search_query=search_query,
+        latitude=latitude,
+        longitude=longitude,
+        user_preferences=user_prefs,
+        occasion=occasion,
+        max_results=5
+    )
+    
+    ctx.logger.info(f"Requesting restaurant suggestions from agent: {RESTAURANT_AGENT_ADDRESS}")
+    await ctx.send(RESTAURANT_AGENT_ADDRESS, request)
+
+# Configuration
+RESTAURANT_AGENT_ADDRESS = os.getenv("RESTAURANT_AGENT_ADDRESS", "agent1qf84yat2xvrn5mjmtz0z0l3dn0z6mtzx4g0x0nj94y6mn96cdn4y3c8yft")  # Update with actual agent address
 
 # Create the agent
 agent = Agent(

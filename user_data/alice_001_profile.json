@@ -1,0 +1,32 @@
+{
+  "user_id": "alice_001",
+  "name": "Alice Chen",
+  "favorite_cuisines": [],
+  "dietary_restrictions": [],
+  "price_range": "moderate",
+  "ambiance_preferences": [],
+  "favorite_restaurants": [],
+  "cuisine_aversions": [],
+  "career_goals": "",
+  "current_role": "",
+  "skills": [],
+  "skill_gaps": [],
+  "communication_style": "",
+  "work_style": "",
+  "risk_tolerance": "",
+  "introvert_extrovert": "",
+  "organizations": [],
+  "hobbies": [],
+  "values": [],
+  "background": "",
+  "strengths": [],
+  "weaknesses": [],
+  "meeting_tolerance": 3,
+  "email_response_time": "same_day",
+  "decision_making_style": "collaborative",
+  "notification_preferences": {
+    "urgent_only": false,
+    "digest": false,
+    "real_time": true
+  }
+}

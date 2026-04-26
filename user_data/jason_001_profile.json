@@ -1,0 +1,69 @@
+{
+  "user_id": "jason_001",
+  "name": "Jason Lukose",
+  "favorite_cuisines": [
+    "Italian",
+    "Japanese",
+    "Thai",
+    "Mexican"
+  ],
+  "dietary_restrictions": [
+    "gluten-free"
+  ],
+  "price_range": "moderate",
+  "ambiance_preferences": [],
+  "favorite_restaurants": [
+    "Local Pizza Place",
+    "Sushi Haven"
+  ],
+  "cuisine_aversions": [],
+  "career_goals": "Become a Senior Software Engineer in AI/ML",
+  "current_role": "Software Engineer",
+  "skills": [
+    "Python",
+    "JavaScript",
+    "Go",
+    "Machine Learning"
+  ],
+  "skill_gaps": [
+    "Rust",
+    "Cloud Architecture",
+    "DevOps"
+  ],
+  "communication_style": "collaborative",
+  "work_style": "independent",
+  "risk_tolerance": "moderate",
+  "introvert_extrovert": "ambivert",
+  "organizations": [
+    "Fetch.ai",
+    "Tech Meetup Group"
+  ],
+  "hobbies": [
+    "Hiking",
+    "Coding",
+    "Reading"
+  ],
+  "values": [
+    "Innovation",
+    "Growth",
+    "Impact"
+  ],
+  "background": "",
+  "strengths": [
+    "Problem Solving",
+    "Communication",
+    "Learning"
+  ],
+  "weaknesses": [
+    "Perfectionism",
+    "Time Management"
+  ],
+  "meeting_tolerance": 3,
+  "email_response_time": "same_day",
+  "decision_making_style": "collaborative",
+  "notification_preferences": {
+    "urgent_only": false,
+    "digest": false,
+    "real_time": true
+  }
+}
