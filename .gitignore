@@ -1,0 +1,17 @@
+# Secrets & tokens — never commit these
+credentials.json
+token.json
+calendar_token.json
+*.token.json
+proactive_state.json
+briefing_state.json
+seen_ids.json
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
