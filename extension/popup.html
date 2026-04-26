@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body {
+    width: 270px;
+    padding: 16px;
+    background: #1a1a2e;
+    color: #e2e8f0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 13px;
+    margin: 0;
+  }
+  h2 { color: #63b3ed; font-size: 15px; margin: 0 0 14px; }
+  label { display: block; margin-bottom: 4px; color: #a0aec0; font-size: 12px; }
+  input {
+    width: 100%;
+    background: #2d3748;
+    border: 1px solid #4a5568;
+    border-radius: 6px;
+    color: #e2e8f0;
+    font-size: 12px;
+    padding: 7px 9px;
+    box-sizing: border-box;
+    margin-bottom: 10px;
+    outline: none;
+  }
+  input:focus { border-color: #63b3ed; }
+  button {
+    width: 100%;
+    padding: 8px;
+    border-radius: 6px;
+    border: none;
+    cursor: pointer;
+    font-size: 13px;
+    margin-bottom: 8px;
+    transition: opacity 0.15s;
+  }
+  button:hover { opacity: 0.85; }
+  #btn-save { background: #2b4a7a; color: #63b3ed; }
+  #btn-auth { background: #276749; color: #9ae6b4; }
+  hr { border: none; border-top: 1px solid #2d3748; margin: 12px 0; }
+  .row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .badge {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 10px;
+    font-size: 11px;
+  }
+  .badge.ok  { background: #22543d; color: #9ae6b4; }
+  .badge.err { background: #742a2a; color: #feb2b2; }
+  #status { font-size: 12px; min-height: 18px; }
+</style>
+</head>
+<body>
+<h2>⚡ JARVIS</h2>
+
+<label>ASI:One API Key</label>
+<input type="password" id="asi-key" placeholder="sk-..." />
+<button id="btn-save">Save Key</button>
+
+<hr>
+
+<div class="row">
+  <span style="color:#a0aec0; font-size:12px">Google (Gmail + Calendar)</span>
+  <span id="google-badge" class="badge err">not connected</span>
+</div>
+<button id="btn-auth">Connect Google</button>
+
+<div id="status"></div>
+
+<script src="popup.js"></script>
+</body>
+</html>

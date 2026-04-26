@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "JARVIS",
+  "version": "1.0",
+  "description": "Your proactive AI assistant — context-aware, inbox-aware, always on.",
+  "permissions": [
+    "identity",
+    "storage",
+    "tabs",
+    "activeTab",
+    "alarms",
+    "notifications"
+  ],
+  "host_permissions": [
+    "https://www.googleapis.com/*",
+    "https://api.asi1.ai/*"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["overlay.css", "icons/*.png"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content_script.js"],
+      "run_at": "document_end",
+      "all_frames": false
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "JARVIS",
+    "default_icon": {
+      "16":  "icons/icon16.png",
+      "48":  "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16":  "icons/icon16.png",
+    "48":  "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
