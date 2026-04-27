@@ -104,8 +104,15 @@ function captureCurrentStep() {
 async function finishQuiz() {
   captureCurrentStep();
   answers.completedAt = Date.now();
-  await chrome.storage.sync.set({ jarvis_profile: answers });
-  showProfile({ justSaved: true });
+  console.log('[JARVIS quiz] saving profile:', answers);
+  try {
+    await chrome.storage.sync.set({ jarvis_profile: answers });
+    console.log('[JARVIS quiz] profile saved');
+    showProfile({ justSaved: true });
+  } catch (err) {
+    console.error('[JARVIS quiz] save failed:', err);
+    statusEl.innerHTML = `<span class="badge err">Save failed: ${err.message}</span>`;
+  }
 }
 
 // ── Wire up steps ─────────────────────────────────────────────────────────────
@@ -150,10 +157,12 @@ steps.forEach((step, idx) => {
   }
 
   if (type === 'chips') {
-    answers[field] = answers[field] || [];
     step.querySelectorAll('.chip').forEach(chip => {
       chip.addEventListener('click', () => {
         const val = chip.dataset.value;
+        // Re-resolve answers[field] every click — `answers` may have been reassigned
+        // by the storage boot callback after this handler was bound.
+        if (!Array.isArray(answers[field])) answers[field] = [];
         const arr = answers[field];
         if (chip.classList.toggle('selected')) {
           if (!arr.includes(val)) arr.push(val);

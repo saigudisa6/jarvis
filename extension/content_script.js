@@ -268,10 +268,17 @@
     _highlightObserver = new MutationObserver(() => {
       if (!_activeHighlightMeetings) return;
       clearTimeout(_highlightDebounce);
-      _highlightDebounce = setTimeout(() => {
+      _highlightDebounce = setTimeout(async () => {
         if (!_activeHighlightMeetings) return;
-        const rows = findMatchingRows(_activeHighlightMeetings);
+        const before = document.querySelectorAll('.jarvis-row-highlight').length;
+        const rows   = findMatchingRows(_activeHighlightMeetings);
         rows.forEach(r => r.classList.add('jarvis-row-highlight'));
+        const after  = document.querySelectorAll('.jarvis-row-highlight').length;
+        // New rows highlighted? Rebuild notes so they get suggestions too.
+        if (after > before) {
+          await buildContextualNotes(_activeHighlightMeetings);
+        }
+        applyPendingNotes();
       }, 250);
     });
     _highlightObserver.observe(document.body, { childList: true, subtree: true });
@@ -286,6 +293,11 @@
     _highlightDebounce = null;
   }
 
+  // Notes we want present, keyed by an identifier per row+text. Re-added on every
+  // observer pass if Gmail stripped them or new matching rows appeared.
+  let _pendingNotes = [];  // [{ rowMatcher: (row)=>bool, text: string, id: string }]
+  let _calendarEventsCache = null;
+
   function highlightTimesInEmail(meetings) {
     ensureTimeHighlightStyles();
     ensureNoteStyles();
@@ -294,23 +306,32 @@
     const rows = findMatchingRows(meetings);
     rows.forEach(r => r.classList.add('jarvis-row-highlight'));
     _activeHighlightMeetings = meetings;
+    _pendingNotes = [];
+    _calendarEventsCache = null;
     startHighlightObserver();
     console.log(`[JARVIS] highlighted ${rows.length} row(s); watching for new ones`);
 
-    // Inline contextual notes — fired async since they may need calendar data
-    addContextualNotes(meetings, rows);
+    // Build notes spec, then apply
+    buildContextualNotes(meetings).then(() => applyPendingNotes());
     return rows.length;
   }
 
   function clearTimeHighlights() {
     _activeHighlightMeetings = null;
+    _pendingNotes = [];
+    _calendarEventsCache = null;
     stopHighlightObserver();
     document.querySelectorAll('.jarvis-row-highlight')
       .forEach(el => el.classList.remove('jarvis-row-highlight'));
+    clearFloatingNotes();
+    // Belt-and-suspenders cleanup of any legacy TR-sibling notes
     document.querySelectorAll('.jarvis-note-row, .jarvis-note-block').forEach(el => el.remove());
   }
 
   // ── Inline contextual notes ────────────────────────────────────────────────────
+  // Fixed-positioned floating notes anchored to each highlighted row's bounding
+  // rect. More reliable in Gmail than injecting <tr> siblings (Gmail's table CSS
+  // can squash those to zero height or strip them on re-render).
   let _noteStylesInjected = false;
   function ensureNoteStyles() {
     if (_noteStylesInjected) return;
@@ -318,26 +339,34 @@
     const style = document.createElement('style');
     style.id = 'jarvis-note-styles';
     style.textContent = `
-      .jarvis-note-row > td { padding: 0 !important; }
       .jarvis-note {
-        margin: 6px 24px 10px;
-        padding: 12px 16px;
-        background: rgba(20, 20, 25, 0.85) !important;
+        position: fixed !important;
+        background: rgba(20, 20, 25, 0.92) !important;
         backdrop-filter: blur(30px) saturate(180%);
         -webkit-backdrop-filter: blur(30px) saturate(180%);
-        color: rgba(255, 255, 255, 0.92) !important;
-        border: 0.5px solid rgba(255, 255, 255, 0.12) !important;
+        color: rgba(255, 255, 255, 0.95) !important;
+        border: 0.5px solid rgba(255, 255, 255, 0.14) !important;
         border-left: 3px solid #ff9f0a !important;
         border-radius: 12px !important;
-        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif;
-        font-size: 13.5px;
-        font-weight: 500;
-        line-height: 1.45;
-        letter-spacing: -0.1px;
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-        display: flex;
-        align-items: flex-start;
-        gap: 8px;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif !important;
+        font-size: 13.5px !important;
+        font-weight: 500 !important;
+        line-height: 1.45 !important;
+        letter-spacing: -0.1px !important;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45) !important;
+        padding: 11px 14px !important;
+        display: flex !important;
+        align-items: flex-start !important;
+        gap: 8px !important;
+        z-index: 2147483646 !important;
+        pointer-events: auto !important;
+        opacity: 0;
+        transition: opacity 0.2s ease, transform 0.2s ease;
+        transform: translateY(-4px);
+      }
+      .jarvis-note.show {
+        opacity: 1;
+        transform: translateY(0);
       }
       .jarvis-note .jarvis-note-icon {
         flex-shrink: 0;
@@ -351,6 +380,7 @@
         letter-spacing: 0.1px;
         text-transform: lowercase;
       }
+      .jarvis-note b { color: #fbd38d; font-weight: 600; }
     `;
     document.head.appendChild(style);
   }
@@ -365,21 +395,64 @@
     return note;
   }
 
-  function addNoteAfterRow(row, text) {
-    if (!row?.parentNode) return;
-    let wrapper;
-    if (row.tagName === 'TR') {
-      wrapper = document.createElement('tr');
-      wrapper.className = 'jarvis-note-row';
-      const td = document.createElement('td');
-      td.colSpan = Math.max(row.children.length, 6);
-      td.appendChild(buildNote(text));
-      wrapper.appendChild(td);
-    } else {
-      wrapper = buildNote(text);
-      wrapper.classList.add('jarvis-note-block');
+  // Track row → note pairs so we can update positions on scroll
+  let _floatingNotes = [];  // [{ row, note, id, updatePos }]
+
+  function addNoteAfterRow(row, text, id) {
+    if (!row) return;
+    const note = buildNote(text);
+    if (id) note.dataset.noteId = id;
+    document.body.appendChild(note);
+
+    function updatePos() {
+      const r = row.getBoundingClientRect();
+      // Row gone or off-screen
+      if (r.width === 0 && r.height === 0) {
+        note.style.opacity = '0';
+        return false;
+      }
+      // Calculate position: just below the row, indented
+      const top = r.bottom + 4;
+      const left = Math.max(r.left + 12, 12);
+      const width = Math.min(r.width - 24, window.innerWidth - 24);
+      note.style.top    = `${top}px`;
+      note.style.left   = `${left}px`;
+      note.style.width  = `${width}px`;
+      // Hide if scrolled off-screen
+      const onScreen = r.bottom > 0 && r.top < window.innerHeight;
+      note.classList.toggle('show', onScreen);
+      return true;
     }
-    row.parentNode.insertBefore(wrapper, row.nextSibling);
+
+    updatePos();
+    requestAnimationFrame(() => note.classList.add('show'));
+    _floatingNotes.push({ row, note, id, updatePos });
+  }
+
+  function refreshFloatingNotes() {
+    _floatingNotes = _floatingNotes.filter(({ note, updatePos }) => {
+      if (!note.isConnected) return false;
+      const ok = updatePos();
+      if (!ok) {
+        note.remove();
+        return false;
+      }
+      return true;
+    });
+  }
+
+  function clearFloatingNotes() {
+    _floatingNotes.forEach(({ note }) => note.remove());
+    _floatingNotes = [];
+  }
+
+  // Re-position notes on scroll/resize (capture phase to catch nested scrollers in Gmail)
+  let _scrollListenerAttached = false;
+  function ensureScrollListener() {
+    if (_scrollListenerAttached) return;
+    _scrollListenerAttached = true;
+    window.addEventListener('scroll',  refreshFloatingNotes, true);
+    window.addEventListener('resize',  refreshFloatingNotes);
   }
 
   function findRowForMeeting(meeting, rows) {
@@ -404,41 +477,152 @@
     } catch { return meeting.startTime; }
   }
 
-  async function addContextualNotes(meetings, rows) {
-    if (!meetings?.length || !rows?.length) return;
+  // Build a per-row note for every highlighted row. Each note is contextualized
+  // to the email it sits below: calendar conflicts + same-sender duplicates +
+  // a fallback acknowledgement so EVERY row always gets some suggestion.
+  async function buildContextualNotes(meetings) {
+    _pendingNotes = [];
+    clearFloatingNotes();  // start fresh — observer rebuild paths trigger this too
+    if (!meetings?.length) {
+      console.log('[JARVIS notes] no meetings, skipping');
+      return;
+    }
+    const rows = [...document.querySelectorAll('.jarvis-row-highlight')];
+    if (!rows.length) {
+      console.log('[JARVIS notes] no highlighted rows yet — will retry via observer');
+    }
+    console.log('[JARVIS notes] building for', meetings.length, 'meeting(s) and', rows.length, 'row(s)');
 
-    // 1) Same-sender conflicting requests
-    const senders = [...new Set(meetings.map(m => m.attendeeEmail).filter(Boolean))];
-    if (meetings.length > 1 && senders.length === 1) {
-      const sender = senders[0];
-      const times = meetings.map(fmtMeetingTime).filter(Boolean).join(' and ');
-      addNoteAfterRow(rows[0], `conflicting scheduling requests from <b>${sender}</b> — ${times}`);
+    // Fetch calendar events once per session
+    if (_calendarEventsCache === null) {
+      try {
+        const res = await chrome.runtime.sendMessage({ type: 'GET_EVENTS' });
+        _calendarEventsCache = res?.events || [];
+        console.log('[JARVIS notes] fetched', _calendarEventsCache.length, 'calendar events');
+      } catch (err) {
+        console.warn('[JARVIS notes] GET_EVENTS failed:', err);
+        _calendarEventsCache = [];
+      }
+    }
+    const events = _calendarEventsCache;
+
+    // Group meetings by sender so we can detect duplicates per sender
+    const bySender = {};
+    for (const m of meetings) {
+      const s = m.attendeeEmail || '?';
+      (bySender[s] = bySender[s] || []).push(m);
     }
 
-    // 2) Calendar conflicts
-    let events = [];
-    try {
-      const res = await chrome.runtime.sendMessage({ type: 'GET_EVENTS' });
-      events = res?.events || [];
-    } catch { /* not authed or no calendar — silently skip */ }
-    if (!events.length) return;
+    // For each highlighted row, find which meeting(s) it matches and build a
+    // note for THAT row specifically.
+    for (let rowIdx = 0; rowIdx < rows.length; rowIdx++) {
+      const row = rows[rowIdx];
+      // Find meetings whose time text matches this row
+      const matched = meetings.filter(m => {
+        const ps = timePatternsFor(m);
+        if (!ps.length) return false;
+        const re = new RegExp(`(?<![\\d:])(?:${ps.join('|')})(?!\\w|:)`, 'gi');
+        return re.test(row.textContent);
+      });
+      if (!matched.length) continue;
 
-    for (const meeting of meetings) {
-      const meetingDt = new Date(`${meeting.startDate}T${meeting.startTime}:00`);
-      if (isNaN(meetingDt.getTime())) continue;
-      // Same-day events within ±2 hours of the proposed meeting
+      const primary = matched[0];
+      const text    = buildNoteTextFor(primary, bySender, events);
+      // Stable id keyed on the meeting itself — survives row reordering / new arrivals
+      const noteId  = `${primary.attendeeEmail || '?'}:${primary.startTime}:${rowIdx}`;
+
+      _pendingNotes.push({
+        id: noteId,
+        // Bind to this specific row via closure; fall back to text-matching if it
+        // disappears from the DOM (Gmail strips a row, etc.)
+        rowMatcher: (currentRows) => {
+          if (row.isConnected && currentRows.includes(row)) return row;
+          return findRowForMeeting(primary, currentRows);
+        },
+        text,
+      });
+    }
+    console.log(`[JARVIS notes] built ${_pendingNotes.length} note(s) for ${rows.length} row(s)`);
+  }
+
+  // Compose the text for one row's note from the meeting it's about, the full
+  // sender→meetings map, and the user's calendar events.
+  function buildNoteTextFor(meeting, meetingsBySender, events) {
+    const parts  = [];
+    const sender = meeting.attendeeEmail;
+    const mDt    = new Date(`${meeting.startDate}T${meeting.startTime}:00`);
+
+    // Calendar conflict — same day, within 2h of the proposed time
+    if (!isNaN(mDt.getTime()) && events.length) {
       const conflict = events.find(ev => {
         const evDt = new Date(ev.start);
         if (isNaN(evDt.getTime())) return false;
-        const sameDay = evDt.toDateString() === meetingDt.toDateString();
-        const hoursApart = Math.abs(evDt - meetingDt) / 36e5;
-        return sameDay && hoursApart < 2;
+        const sameDay   = evDt.toDateString() === mDt.toDateString();
+        const hoursDiff = Math.abs(evDt - mDt) / 36e5;
+        return sameDay && hoursDiff < 2;
       });
-      if (!conflict) continue;
-      const row = findRowForMeeting(meeting, rows);
-      if (!row) continue;
-      addNoteAfterRow(row,
-        `you have <b>"${conflict.title}"</b> at ${fmtTime(conflict.start)} — this could pull you off track.`);
+      if (conflict) {
+        parts.push(`conflicts with <b>"${escapeHtml(conflict.title)}"</b> at ${escapeHtml(fmtTime(conflict.start))}`);
+      }
+    }
+
+    // Same-sender duplicates — other times this person also proposed
+    if (sender && meetingsBySender[sender]?.length > 1) {
+      const others = meetingsBySender[sender]
+        .filter(m => m !== meeting)
+        .map(fmtMeetingTime)
+        .filter(Boolean);
+      if (others.length) {
+        parts.push(`same sender also proposed <b>${escapeHtml(others.join(' and '))}</b>`);
+      }
+    }
+
+    // Always-on fallback so every row gets *something*
+    if (!parts.length) {
+      const when = fmtMeetingTime(meeting);
+      parts.push(`meeting request at <b>${escapeHtml(when)}</b> — check your day before committing`);
+    }
+    return parts.join(' · ');
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  // Idempotently attach notes. Runs after initial highlight AND on every
+  // observer pass. Skips notes already present, refreshes positions otherwise.
+  function applyPendingNotes() {
+    refreshFloatingNotes();  // update positions of any existing notes
+    if (!_pendingNotes.length) {
+      console.log('[JARVIS notes] applyPendingNotes: nothing to apply');
+      return;
+    }
+    const rows = [...document.querySelectorAll('.jarvis-row-highlight')];
+    if (!rows.length) {
+      console.log('[JARVIS notes] applyPendingNotes: no highlighted rows yet');
+      return;
+    }
+    ensureScrollListener();
+    let added = 0;
+    for (const spec of _pendingNotes) {
+      const row = spec.rowMatcher(rows);
+      if (!row) {
+        console.log('[JARVIS notes] no row matched for spec', spec.id);
+        continue;
+      }
+      // Already present and still attached to the same row?
+      const existing = _floatingNotes.find(f => f.id === spec.id);
+      if (existing && existing.row === row && existing.note.isConnected) continue;
+      // If we have one for this id but the row changed (or note got removed), drop it
+      if (existing) {
+        existing.note.remove();
+        _floatingNotes = _floatingNotes.filter(f => f !== existing);
+      }
+      addNoteAfterRow(row, spec.text, spec.id);
+      added++;
+    }
+    if (added) {
+      console.log(`[JARVIS notes] inserted ${added} note(s); total floating:`, _floatingNotes.length);
     }
   }
 
